@@ -9,10 +9,14 @@
 #include "driver_audio.h"
 #include "driver_keyboard.h"
 #include "driver_tones.h"
+#include "driver_sct3258.h"
+#include "driver_linkboard.h"
+#include "aprs_packet.h"
 #include "codeplug_storage.h"
 #include "dmr_protocol.h"
 #include "scanner.h"
 #include "hal_adc.h"
+#include "hal_systick.h"
 #include <string.h>
 
 static radio_core_status_t s_radio;
@@ -135,12 +139,25 @@ void radio_core_process(void)
     scanner_status_t sc_stat;
     scanner_get_status(&sc_stat);
     s_radio.scan_active = (sc_stat.state == SCAN_STATE_SCANNING);
+
+    /* Periyodik APRS Konum Beacon'ı (120 sn / 12000 tick) */
+    if ((s_tick_counter % 12000) == 0 && s_radio.state == RADIO_STATE_STANDBY) {
+        radio_core_send_aprs_beacon();
+    }
 }
 
 int radio_core_set_active_vfo(vfo_index_t vfo)
 {
     if (vfo > VFO_B) return -1;
     s_radio.active_vfo = vfo;
+
+    /* Baseband modunu aktif VFO tipine göre yapılandır */
+    if (s_radio.vfo_channels[vfo].mode == CH_MODE_DMR) {
+        sct3258_set_mode(SCT3258_MODE_DMR_RX);
+    } else {
+        sct3258_set_mode(SCT3258_MODE_ANALOG_RX);
+    }
+
     return at1846s_set_frequency(s_radio.vfo_channels[vfo].rx_freq_hz);
 }
 
@@ -153,6 +170,13 @@ int radio_core_start_tx(void)
     at1846s_rx_off();
     at1846s_set_frequency(ch->tx_freq_hz);
     at1846s_tx_on();
+
+    /* DMR modunda SCT3258 ve AMBE vocoder başlat */
+    if (ch->mode == CH_MODE_DMR) {
+        sct3258_set_dmr_params(ch->color_code, (sct3258_slot_t)ch->slot, ch->contact_id, SCT3258_CALL_GROUP);
+        sct3258_dmr_tx_start();
+    }
+
     audio_codec_set_path(AUDIO_PATH_MIC_INTERNAL, true);
     return 0;
 }
@@ -160,6 +184,12 @@ int radio_core_start_tx(void)
 int radio_core_stop_tx(void)
 {
     channel_t *ch = &s_radio.vfo_channels[s_radio.active_vfo];
+
+    /* DMR modunda SCT3258 iletimini durdur */
+    if (ch->mode == CH_MODE_DMR) {
+        sct3258_dmr_tx_stop();
+        sct3258_set_mode(SCT3258_MODE_DMR_RX);
+    }
 
     /* Analog FM ve CTCSS aktifse STE (Squelch Tail Elimination) gönder */
     if (ch->mode == CH_MODE_ANALOG_FM && ch->ctcss_tx_x10 > 0) {
@@ -172,6 +202,49 @@ int radio_core_stop_tx(void)
     at1846s_rx_on();
     s_radio.state = RADIO_STATE_STANDBY;
     return 0;
+}
+
+int radio_core_send_aprs_beacon(void)
+{
+    gps_data_t gps;
+    double lat = 36.9914;  /* Adana, Türkiye (Varsayılan QTH) */
+    double lon = 35.3308;
+    float alt = 40.0f;
+
+    if (linkboard_gps_get(&gps) == 0 && gps.valid) {
+        lat = gps.latitude;
+        lon = gps.longitude;
+        alt = gps.altitude_m;
+    }
+
+    uint8_t pkt[APRS_MAX_PACKET_LEN];
+    int len = aprs_build_position_packet(
+        "TA5THK", 7, "APD878", "WIDE1-1,WIDE2-1",
+        lat, lon, alt, '/', '>',
+        "AT-D878 Open FW | 73 de TA5THK",
+        pkt, sizeof(pkt)
+    );
+
+    /* LinkBoard alt modeme komut ilet */
+    linkboard_aprs_send_position();
+
+    /* 144.800 MHz RF frekansında doğrudan AFSK 1200 iletimi */
+    if (len > 0 && s_radio.state == RADIO_STATE_STANDBY) {
+        uint32_t saved_freq = s_radio.vfo_channels[s_radio.active_vfo].rx_freq_hz;
+        s_radio.state = RADIO_STATE_TX;
+        at1846s_rx_off();
+        at1846s_set_frequency(144800000); /* 144.800 MHz APRS Standard */
+        at1846s_set_bandwidth(AT1846S_BW_25KHZ);
+        at1846s_tx_on();
+        audio_codec_set_path(AUDIO_PATH_MIC_INTERNAL, false);
+        hal_delay_ms(300); /* AFSK 1200 paket süresi */
+        at1846s_tx_off();
+        at1846s_set_frequency(saved_freq);
+        at1846s_rx_on();
+        s_radio.state = RADIO_STATE_STANDBY;
+    }
+
+    return len;
 }
 
 int radio_core_toggle_vfo(void)

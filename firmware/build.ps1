@@ -1,4 +1,4 @@
-﻿# ==============================================================================
+# ==============================================================================
 # AnyTone AT-D878UVII Plus Open Firmware Build Script (PowerShell)
 # Target: GD32F303VGT6 Cortex-M4 @ 120 MHz
 # Callsign: TA5THK / Fatih ATCI
@@ -74,4 +74,4 @@ if ($LASTEXITCODE -ne 0) {
 Write-Host "==> Packaging firmware (.CDD, .CDI, .spi)..." -ForegroundColor Green
 & $Python "../tools/firmware_analyzer/make_firmware_pkg.py" "build/at_d878_fw.bin" -o "../output_firmware"
 
-Write-Host "`n[✓] Firmware Build & Packaging Succeeded!" -ForegroundColor Green
+Write-Host "`n[OK] Firmware Build and Packaging Succeeded!" -ForegroundColor Green

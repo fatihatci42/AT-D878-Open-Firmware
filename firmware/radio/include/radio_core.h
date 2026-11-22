@@ -96,6 +96,11 @@ int radio_core_step_frequency(bool up);
  */
 void radio_core_get_status(radio_core_status_t *status);
 
+/**
+ * @brief APRS Konum Raporu Beacon'ı ilet (144.800 MHz AFSK 1200)
+ */
+int radio_core_send_aprs_beacon(void);
+
 #ifdef __cplusplus
 }
 #endif
