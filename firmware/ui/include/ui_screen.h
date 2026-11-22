@@ -13,6 +13,7 @@
 #include <stdint.h>
 #include <stdbool.h>
 #include "radio_core.h"
+#include "driver_keyboard.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -46,6 +47,11 @@ int ui_init(ui_language_t lang, ui_theme_t theme);
  * @brief Aktif ekranı çiz / tazele
  */
 void ui_render(const radio_core_status_t *radio_status);
+
+/**
+ * @brief Kullanıcı tuş olayını işle (Menü veya VFO)
+ */
+void ui_handle_key(const key_event_t *event);
 
 /**
  * @brief Ekrana geçiş yap

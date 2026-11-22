@@ -279,7 +279,8 @@ int main(void)
                 radio_core_step_frequency(false); /* Aşağı */
             }
 
-            /* TODO: UI menü navigasyonu (gelecek sürüm) */
+            /* UI menü navigasyonu ve tuş işleme */
+            ui_handle_key(&key_event);
         }
 
         /* C. Radyo durumunu işle */

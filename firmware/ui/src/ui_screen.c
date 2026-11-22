@@ -5,6 +5,7 @@
  */
 
 #include "ui_screen.h"
+#include "ui_menu.h"
 #include "driver_display.h"
 #include <stdio.h>
 #include <string.h>
@@ -33,7 +34,14 @@ int ui_init(ui_language_t lang, ui_theme_t theme)
     s_theme = theme;
     display_init();
     display_clear(COLOR_BLACK);
+    ui_menu_init();
     return 0;
+}
+
+void ui_handle_key(const key_event_t *event)
+{
+    if (!event) return;
+    ui_menu_handle_key(event);
 }
 
 void ui_set_language(ui_language_t lang)
@@ -81,6 +89,11 @@ void ui_draw_smeter(int16_t rssi_dbm, int16_t x, int16_t y)
 
 void ui_render(const radio_core_status_t *radio)
 {
+    if (ui_menu_is_active()) {
+        ui_menu_render();
+        return;
+    }
+
     if (!radio) return;
 
     /* 1. ÜST DURUM ÇUBUĞU (0..14 piksel) */
