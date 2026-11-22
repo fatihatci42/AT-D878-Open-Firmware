@@ -7,6 +7,7 @@
 #include "ui_screen.h"
 #include "ui_menu.h"
 #include "driver_display.h"
+#include "scanner.h"
 #include <stdio.h>
 #include <string.h>
 
@@ -41,7 +42,38 @@ int ui_init(ui_language_t lang, ui_theme_t theme)
 void ui_handle_key(const key_event_t *event)
 {
     if (!event) return;
-    ui_menu_handle_key(event);
+
+    /* Menü aktifse menü işle */
+    if (ui_menu_handle_key(event)) {
+        return;
+    }
+
+    /* Menü kapalıyken telsiz ana ekran tuşları */
+    if (event->event == KEY_EVENT_PRESS) {
+        switch (event->code) {
+        case KEY_P1:
+            radio_core_toggle_vfo();
+            break;
+        case KEY_P2: {
+            scanner_status_t sc;
+            scanner_get_status(&sc);
+            if (sc.state == SCAN_STATE_SCANNING) {
+                scanner_stop();
+            } else {
+                scanner_start_channel_scan(SCAN_RESUME_CARRIER);
+            }
+            break;
+        }
+        case KEY_UP:
+            radio_core_step_frequency(true);
+            break;
+        case KEY_DOWN:
+            radio_core_step_frequency(false);
+            break;
+        default:
+            break;
+        }
+    }
 }
 
 void ui_set_language(ui_language_t lang)
@@ -114,12 +146,25 @@ void ui_render(const radio_core_status_t *radio)
     /* Bluetooth İkonu */
     display_draw_string(66, 3, "B", COLOR_CYAN, COLOR_NAVY, 1);
 
-    /* DMR Renk Kodu */
-    display_draw_string(76, 3, "C1", COLOR_MAGENTA, COLOR_NAVY, 1);
+    /* DMR Renk Kodu veya Tarama */
+    if (radio->scan_active) {
+        display_draw_string(74, 3, "SCAN", COLOR_YELLOW, COLOR_NAVY, 1);
+    } else {
+        display_draw_string(76, 3, "C1", COLOR_MAGENTA, COLOR_NAVY, 1);
+    }
 
-    /* Pil Voltajı ve İkonu */
-    display_draw_string(96, 3, "7.6V", COLOR_WHITE, COLOR_NAVY, 1);
-    ui_draw_battery(85, false, 126, 3);
+    /* Pil Voltajı ve İkonu (ADC'den gerçek okuma) */
+    char bat_str[10];
+    if (radio->battery_mv > 0) {
+        snprintf(bat_str, sizeof(bat_str), "%u.%uV", 
+                 (unsigned int)(radio->battery_mv / 1000), 
+                 (unsigned int)((radio->battery_mv % 1000) / 100));
+    } else {
+        strncpy(bat_str, "7.4V", sizeof(bat_str));
+    }
+    uint16_t bat_text_col = (radio->battery_mv > 0 && radio->battery_mv < 6800) ? COLOR_RED : COLOR_WHITE;
+    display_draw_string(96, 3, bat_str, bat_text_col, COLOR_NAVY, 1);
+    ui_draw_battery(radio->battery_percent > 0 ? radio->battery_percent : 75, radio->is_charging, 126, 3);
 
     /* 2. VFO A KUTUSU (15..66 piksel) */
     bool is_vfo_a = (radio->active_vfo == VFO_A);
@@ -146,7 +191,13 @@ void ui_render(const radio_core_status_t *radio)
     uint32_t f_b = radio->vfo_channels[VFO_B].rx_freq_hz;
     snprintf(freq_str, sizeof(freq_str), "%03u.%05u", (unsigned int)(f_b / 1000000), (unsigned int)((f_b % 1000000) / 10));
     display_draw_string(10, 80, freq_str, COLOR_LIGHTGREY, bg_b, 2);
-    display_draw_string(10, 99, "TG: 286 | TS1 | CC: 1", COLOR_LIGHTGREY, bg_b, 1);
+    if (radio->active_caller_alias[0] != '\0') {
+        char call_disp[32];
+        snprintf(call_disp, sizeof(call_disp), "CALL: %s", radio->active_caller_alias);
+        display_draw_string(10, 99, call_disp, COLOR_GREEN, bg_b, 1);
+    } else {
+        display_draw_string(10, 99, "TG: 286 | TS1 | CC: 1", COLOR_LIGHTGREY, bg_b, 1);
+    }
 
     /* 4. ALT ÇUBUK (114..128 piksel) */
     uint16_t bot_bg = (radio->state == RADIO_STATE_TX) ? 0x8000 : 0x18C3;

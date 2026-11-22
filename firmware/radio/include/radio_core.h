@@ -36,6 +36,13 @@ typedef struct {
     uint8_t       current_squelch;
     bool          ptt_locked;
     int16_t       rssi_dbm;
+    uint16_t      battery_mv;
+    uint8_t       battery_percent;
+    bool          is_charging;
+    bool          scan_active;
+    char          active_caller_callsign[16];
+    char          active_caller_alias[24];
+    uint32_t      active_tg;
 } radio_core_status_t;
 
 /**

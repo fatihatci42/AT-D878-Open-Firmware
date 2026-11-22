@@ -84,3 +84,25 @@ void tones_format_dcs(uint16_t octal_code, bool inverted, char *out_str, size_t 
         snprintf(out_str, max_len, "D%03u%c", octal_code, inverted ? 'I' : 'N');
     }
 }
+
+void tones_transmit_ste_tail(ste_mode_t mode, uint16_t ctcss_freq_x10)
+{
+    if (mode == STE_MODE_OFF) return;
+    (void)ctcss_freq_x10;
+
+    switch (mode) {
+    case STE_MODE_CTCSS_REVERSE_180:
+    case STE_MODE_CTCSS_REVERSE_120:
+    case STE_MODE_DCS_134HZ:
+    case STE_MODE_55HZ:
+    default:
+        break;
+    }
+}
+
+bool tones_detect_ste_tail(ste_mode_t mode)
+{
+    if (mode == STE_MODE_OFF) return false;
+    return false;
+}
+

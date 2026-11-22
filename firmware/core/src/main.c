@@ -32,6 +32,7 @@
 #include "driver_spi_flash.h"
 #include "driver_linkboard.h"
 #include "radio_core.h"
+#include "cps_protocol.h"
 #include "ui_screen.h"
 
 /* ============================================================
@@ -215,8 +216,9 @@ int main(void)
     }
 
     /* ============================================
-     * 9. Radyo Çekirdeği
+     * 9. Radyo Çekirdeği & CPS İletişimi
      * ============================================ */
+    cps_protocol_init();
     radio_core_init();
     s_boot.radio_core = true;
 
@@ -283,8 +285,9 @@ int main(void)
             ui_handle_key(&key_event);
         }
 
-        /* C. Radyo durumunu işle */
+        /* C. Radyo durumunu ve CPS seri iletişimini işle */
         radio_core_process();
+        cps_protocol_process();
 
         /* D. LinkBoard verilerini işle (GPS/APRS/BT) */
         if (s_boot.linkboard) {

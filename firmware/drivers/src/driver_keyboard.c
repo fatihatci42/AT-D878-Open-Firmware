@@ -315,3 +315,9 @@ bool keyboard_is_ptt_pressed(void)
 {
     return !hal_gpio_read(PIN_PTT);
 }
+
+bool keyboard_inject_event(key_code_t code, key_event_type_t event)
+{
+    enqueue_event(code, event);
+    return true;
+}

@@ -33,6 +33,9 @@ typedef enum {
     KEY_ROTARY_PRESS
 } key_code_t;
 
+#define KEY_P1    KEY_SIDE1
+#define KEY_P2    KEY_SIDE2
+
 typedef enum {
     KEY_EVENT_PRESS = 0,
     KEY_EVENT_RELEASE,
@@ -60,6 +63,11 @@ bool keyboard_get_event(key_event_t *event);
  * @brief PTT tuşu şu an basılı mı?
  */
 bool keyboard_is_ptt_pressed(void);
+
+/**
+ * @brief Dışarıdan (CPS/Seri porttan) tuş basımı enjekte et
+ */
+bool keyboard_inject_event(key_code_t code, key_event_type_t event);
 
 #ifdef __cplusplus
 }

@@ -52,6 +52,27 @@ void tones_format_ctcss(uint16_t freq_x10, char *out_str, size_t max_len);
  */
 void tones_format_dcs(uint16_t octal_code, bool inverted, char *out_str, size_t max_len);
 
+typedef enum {
+    STE_MODE_OFF = 0,
+    STE_MODE_CTCSS_REVERSE_180,  /**< 180 derece CTCSS ters faz (Standart) */
+    STE_MODE_CTCSS_REVERSE_120,  /**< 120 derece CTCSS ters faz (Motorola) */
+    STE_MODE_DCS_134HZ,          /**< 134.4 Hz DCS Turn-off tonu */
+    STE_MODE_55HZ                /**< 55.2 Hz Çin standardı */
+} ste_mode_t;
+
+/**
+ * @brief TX bitişinde Squelch Tail Elimination (STE) dizisini yürüt
+ * @param mode STE modu
+ * @param ctcss_freq_x10 Aktif CTCSS frekansı (varsa)
+ */
+void tones_transmit_ste_tail(ste_mode_t mode, uint16_t ctcss_freq_x10);
+
+/**
+ * @brief RX sırasında STE algılandı mı kontrol et
+ * @return true = Karşı taraf mandalı bıraktı, sesi hemen kes (mute)
+ */
+bool tones_detect_ste_tail(ste_mode_t mode);
+
 #ifdef __cplusplus
 }
 #endif
