@@ -102,6 +102,38 @@ int radio_core_stop_tx(void)
     return 0;
 }
 
+int radio_core_toggle_vfo(void)
+{
+    vfo_index_t next = (s_radio.active_vfo == VFO_A) ? VFO_B : VFO_A;
+    return radio_core_set_active_vfo(next);
+}
+
+int radio_core_step_frequency(bool up)
+{
+    channel_t *ch = &s_radio.vfo_channels[s_radio.active_vfo];
+    /* Varsayılan adım: 12.5 kHz (dar bant) veya 25 kHz (geniş bant) */
+    uint32_t step = (ch->bandwidth == BANDWIDTH_25KHZ) ? 25000 : 12500;
+
+    if (up) {
+        ch->rx_freq_hz += step;
+        ch->tx_freq_hz += step;
+    } else {
+        ch->rx_freq_hz -= step;
+        ch->tx_freq_hz -= step;
+    }
+
+    /* Bant sınır kontrolü */
+    if (ch->rx_freq_hz < 134000000) ch->rx_freq_hz = 134000000;
+    if (ch->rx_freq_hz > 520000000) ch->rx_freq_hz = 520000000;
+    ch->tx_freq_hz = ch->rx_freq_hz;  /* Simplex varsayılan */
+
+    if (s_radio.state != RADIO_STATE_TX) {
+        at1846s_set_frequency(ch->rx_freq_hz);
+    }
+
+    return 0;
+}
+
 void radio_core_get_status(radio_core_status_t *status)
 {
     if (status) {

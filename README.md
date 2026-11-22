@@ -81,16 +81,20 @@ The desktop application includes 9 dedicated modules:
 ### Building the Firmware
 ```bash
 cd firmware
-# Compile and link open firmware
+# Compile and link open firmware with all hardware drivers
 arm-none-eabi-gcc -mcpu=cortex-m4 -mthumb -mfloat-abi=soft -O2 -Wall -Wextra \
   -ffunction-sections -fdata-sections --specs=nano.specs --specs=nosys.specs \
-  -Icore/include -Ihal/include -Idrivers/include -Iradio/include -Iui/include \
+  -Ihal/include -Idrivers/include -Iradio/include -Iui/include \
   "-Tcore/gd32f303vgt6.ld" "-Wl,--gc-sections" -nostartfiles \
   -o build/at_d878_fw.elf \
-  core/src/startup_gd32f303.c core/src/main.c hal/src/hal_gpio.c hal/src/hal_spi.c \
-  hal/src/hal_i2c.c drivers/src/driver_display.c drivers/src/driver_at1846s.c \
-  drivers/src/driver_audio.c drivers/src/driver_keyboard.c radio/src/radio_core.c \
-  ui/src/ui_screen.c
+  core/src/startup_gd32f303.c core/src/main.c \
+  hal/src/hal_gpio.c hal/src/hal_spi.c hal/src/hal_i2c.c \
+  hal/src/hal_systick.c hal/src/hal_uart.c \
+  drivers/src/driver_display.c drivers/src/driver_at1846s.c \
+  drivers/src/driver_audio.c drivers/src/driver_keyboard.c \
+  drivers/src/driver_sct3258.c drivers/src/driver_spi_flash.c \
+  drivers/src/driver_linkboard.c \
+  radio/src/radio_core.c ui/src/ui_screen.c
 
 # Extract binary and package to .CDD / .CDI / .spi
 arm-none-eabi-objcopy -O binary build/at_d878_fw.elf build/at_d878_fw.bin

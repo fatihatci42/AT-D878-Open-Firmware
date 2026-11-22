@@ -74,6 +74,17 @@ int radio_core_start_tx(void);
 int radio_core_stop_tx(void);
 
 /**
+ * @brief VFO A/B arasında geçiş yap
+ */
+int radio_core_toggle_vfo(void);
+
+/**
+ * @brief Frekansı bir adım artır/azalt
+ * @param up true=yukarı, false=aşağı
+ */
+int radio_core_step_frequency(bool up);
+
+/**
  * @brief Radyo çekirdeği anlık durumunu oku
  */
 void radio_core_get_status(radio_core_status_t *status);
