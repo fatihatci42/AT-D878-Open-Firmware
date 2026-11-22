@@ -17,8 +17,12 @@ dist/
 
 # ARM GCC firmware build outputs
 firmware/build/
+firmware/build-review/
+graphify-out/
 *.elf
 *.map
+*.su
+*.hex
 *.o
 *.d
 

@@ -1,26 +1,35 @@
 #!/usr/bin/env python3
-"""
-AnyTone AT-D878 Native USB Bootloader & Communication Engine
-Doğrulanmış AnyTone D878UVII Protokolü:
-1. Adım: b'PROGRAM'  -> Yanıt: b'QX\x06' (Qixiang ACK)
-2. Adım: b'\x02'     -> Yanıt: b'ID878UV2\x00V101\x00\x00\x06' (Model ve Versiyon)
-3. Adım: b'\x06'     -> Yanıt: ACK / Durum Bilgisi
+"""Serial discovery and non-destructive AT-D878 package checks.
+
+The repository does not contain a verified write protocol for any target. This
+module deliberately keeps real writes disabled until target-specific framing
+and recovery behavior have been validated against hardware.
 """
 
-import sys
 import os
-import time
 import struct
+import time
+
 import serial
-import serial.tools.list_ports
 
 CMD_ACK = b"\x06"
-CMD_NACK = b"\x15"
 CMD_PROGRAM = b"PROGRAM"
 CMD_QUERY_ID = b"\x02"
 
 FLASH_APP_BASE = 0x08004000
-BLOCK_SIZE = 1024  # 1 KB
+FLASH_APP_SIZE = (1024 * 1024) - (FLASH_APP_BASE - 0x08000000)
+RAM_BASE = 0x20000000
+RAM_SIZE = 96 * 1024
+BLOCK_SIZE = 1024
+MAX_PACKAGE_SIZE = 16 * 1024 * 1024
+
+FLASH_TARGETS = {
+    "mcu": "Ana MCU (GD32)",
+    "icons": "İkon / font flash",
+    "sct3258": "DMR baseband (SCT3258)",
+    "linkboard": "LinkBoard (APRS / Bluetooth)",
+}
+
 
 class AnyToneFlasher:
     def __init__(self, port, baudrate=921600, timeout=1.5):
@@ -40,127 +49,102 @@ class AnyToneFlasher:
                 parity=serial.PARITY_NONE,
                 stopbits=serial.STOPBITS_ONE,
                 timeout=self.timeout,
-                write_timeout=self.timeout
+                write_timeout=self.timeout,
             )
             time.sleep(0.05)
-            return True, f"Port {self.port} başarıyla açıldı ({self.baudrate} baud)."
-        except serial.SerialException as se:
-            if "PermissionError" in str(se) or "Erişim engellendi" in str(se):
-                return False, f"{self.port} portuna erişim engellendi. (Başka bir program COM portunu kullanıyor olabilir)"
-            return False, f"Seri port hatası: {str(se)}"
-        except Exception as e:
-            return False, f"Bağlantı hatası: {str(e)}"
+            return True, f"Port {self.port} açıldı ({self.baudrate} baud)."
+        except serial.SerialException as exc:
+            return False, f"Seri port açılamadı: {exc}"
+        except Exception as exc:
+            return False, f"Bağlantı hatası: {exc}"
 
     def disconnect(self):
         if self.ser and self.ser.is_open:
             try:
                 self.ser.close()
-            except Exception:
+            except serial.SerialException:
                 pass
 
     def ping_device(self):
-        """
-        AnyTone donanım el sıkışmasını gerçekleştirir ve model bilgisini okur.
-        """
+        """Query and verify the D878 model; an arbitrary QX reply is insufficient."""
         if not self.ser or not self.ser.is_open:
-            ok, msg = self.connect()
+            ok, message = self.connect()
             if not ok:
-                return False, msg
+                return False, message
 
         try:
             self.ser.reset_input_buffer()
             self.ser.reset_output_buffer()
-
-            # 1. Aşama: PROGRAM el sıkışması
             self.ser.write(CMD_PROGRAM)
             self.ser.flush()
-            time.sleep(0.05)
-            resp1 = self.ser.read(16)
+            response = self.ser.read(16)
+            if b"QX" not in response:
+                detail = response.hex() if response else "zaman aşımı"
+                return False, f"PROGRAM yanıtı tanınmadı (0x{detail})."
 
-            if not resp1 or b"QX" not in resp1:
-                # Farklı baud rate veya mod deneme
-                return False, f"Cihazdan QX yanıtı alınamadı (Gelen: {resp1.hex() if resp1 else 'Zaman Aşımı'}). Telsizin açık ve kablonun takılı olduğunu kontrol edin."
-
-            # 2. Aşama: Model ve Donanım Versiyonu Sorgulama
             self.ser.write(CMD_QUERY_ID)
             self.ser.flush()
-            time.sleep(0.05)
-            resp2 = self.ser.read(32)
+            response = self.ser.read(32)
+            clean = response.replace(CMD_ACK, b"").replace(CMD_QUERY_ID, b"")
+            fields = [part.decode("ascii", errors="ignore") for part in clean.split(b"\x00") if part]
+            model = fields[0] if fields else ""
+            if not any(token in model.upper() for token in ("D878", "878UV")):
+                detail = response.hex() if response else "zaman aşımı"
+                return False, f"D878 model kimliği doğrulanamadı (0x{detail})."
 
-            id_str = ""
-            if resp2:
-                # Örnek: b'ID878UV2\x00V101\x00\x00\x06'
-                clean_bytes = resp2.replace(b"\x06", b"").replace(b"\x02", b"")
-                parts = [p.decode("latin1", errors="ignore") for p in clean_bytes.split(b"\x00") if p]
-                if parts:
-                    self.model_info = parts[0]
-                    self.hw_version = parts[1] if len(parts) > 1 else "Bilinmiyor"
-                    id_str = f"Model: {self.model_info} | Donanım: {self.hw_version}"
-
-            # 3. Aşama: ACK onayı
+            self.model_info = model
+            self.hw_version = fields[1] if len(fields) > 1 else "Bilinmiyor"
             self.ser.write(CMD_ACK)
             self.ser.flush()
+            return True, f"D878 modeli doğrulandı: {self.model_info} / {self.hw_version}"
+        except Exception as exc:
+            return False, f"İletişim sırasında hata: {exc}"
 
-            return True, f"Telsiz Başarıyla Bağlandı! {id_str}"
-        except Exception as e:
-            return False, f"İletişim sırasında hata: {str(e)}"
+    def flash_binary(self, bin_path, progress_callback=None, dry_run=True, target="mcu"):
+        """Check a package and simulate progress without sending data to the radio."""
+        if target not in FLASH_TARGETS:
+            return False, f"Bilinmeyen yazma hedefi: {target}"
+        if not os.path.isfile(bin_path):
+            return False, "Seçilen dosya bulunamadı."
 
-    def flash_binary(self, bin_path, progress_callback=None, dry_run=False):
-        """Firmware dosyasını blok blok yükle"""
-        if not os.path.exists(bin_path):
-            return False, "Firmware dosyası bulunamadı."
+        try:
+            total_bytes = os.path.getsize(bin_path)
+            if total_bytes == 0 or total_bytes > MAX_PACKAGE_SIZE:
+                return False, f"Dosya boyutu desteklenmiyor: {total_bytes} byte."
+            with open(bin_path, "rb") as package:
+                data = package.read()
+        except OSError as exc:
+            return False, f"Dosya okunamadı: {exc}"
 
-        with open(bin_path, "rb") as f:
-            fw_data = f.read()
+        if target == "mcu":
+            if total_bytes < 8 or total_bytes > FLASH_APP_SIZE:
+                return False, f"MCU imajı uygulama alanı sınırında değil ({total_bytes} byte)."
+            sp, reset = struct.unpack("<II", data[:8])
+            reset_address = reset & ~1
+            valid_sp = RAM_BASE <= sp <= RAM_BASE + RAM_SIZE and sp % 8 == 0
+            valid_reset = (reset & 1) == 1 and FLASH_APP_BASE <= reset_address < FLASH_APP_BASE + total_bytes
+            if not valid_sp or not valid_reset:
+                return False, f"Geçersiz MCU vektör tablosu (SP=0x{sp:08X}, Reset=0x{reset:08X})."
 
-        total_bytes = len(fw_data)
-        if total_bytes < 100 or total_bytes > 960 * 1024:
-            return False, f"Geçersiz firmware boyutu: {total_bytes} byte."
+        if not dry_run:
+            return False, (
+                "Gerçek yazma devre dışı: bu projede hiçbir hedef için doğrulanmış "
+                "bootloader yazma protokolü yok. Cihaza veri gönderilmedi."
+            )
 
-        # Vektör tablosu kontrolü
-        sp, reset = struct.unpack("<II", fw_data[:8])
-        if (sp & 0xFFFE0000) != 0x20000000 or (reset & 0xFFF00000) != 0x08000000:
-            return False, f"Hatalı Vektör Tablosu! SP: 0x{sp:08X}, Reset: 0x{reset:08X}"
+        total_blocks = max(1, (total_bytes + BLOCK_SIZE - 1) // BLOCK_SIZE)
+        last_percent = -1
+        for block_index in range(total_blocks):
+            percent = int(((block_index + 1) / total_blocks) * 100)
+            if progress_callback and percent != last_percent:
+                progress_callback(percent, f"Ön kontrol: %{percent} — {FLASH_TARGETS[target]}")
+                last_percent = percent
 
-        if dry_run:
-            total_blocks = (total_bytes + BLOCK_SIZE - 1) // BLOCK_SIZE
-            for b_idx in range(total_blocks):
-                time.sleep(0.02)
-                progress = int(((b_idx + 1) / total_blocks) * 100)
-                if progress_callback:
-                    progress_callback(progress, f"Simülasyon Bloğu {b_idx+1}/{total_blocks}")
-            return True, f"Simülasyon başarılı! ({total_bytes} byte doğrulandı)"
-
-        # Gerçek donanıma yazma
-        if not self.ser or not self.ser.is_open:
-            ok, msg = self.connect()
-            if not ok:
-                return False, msg
-
-        # Handshake doğrula
-        ok, msg = self.ping_device()
-        if not ok:
-            return False, f"Yazma öncesi el sıkışma başarısız: {msg}"
-
-        total_blocks = (total_bytes + BLOCK_SIZE - 1) // BLOCK_SIZE
-        for b_idx in range(total_blocks):
-            off = b_idx * BLOCK_SIZE
-            chunk = fw_data[off:off + BLOCK_SIZE]
-            target_addr = FLASH_APP_BASE + off
-
-            header = struct.pack(">B I H", 0x02, target_addr, len(chunk))
-            checksum = (sum(header) + sum(chunk)) & 0xFF
-            packet = header + chunk + bytes([checksum])
-
-            self.ser.write(packet)
-            self.ser.flush()
-
-            ack = self.ser.read(1)
-            if ack != CMD_ACK and b"\x06" not in ack:
-                return False, f"Blok {b_idx} için ACK alınamadı (Yanıt: {ack.hex() if ack else 'Zaman Aşımı'})"
-
-            progress = int(((b_idx + 1) / total_blocks) * 100)
-            if progress_callback:
-                progress_callback(progress, f"Yazılıyor: %{progress} (Adres: 0x{target_addr:08X})")
-
-        return True, f"Yükleme tamamlandı! ({total_bytes} byte başarıyla aktarıldı)"
+        if target == "mcu":
+            detail = "vektör tablosu ve uygulama alanı boyutu doğrulandı"
+        else:
+            detail = "dosya okunabildi ve boyut sınırında; hedef paket biçimi doğrulanmadı"
+        return True, (
+            f"Dry-run tamamlandı: {FLASH_TARGETS[target]}, {total_bytes} byte; "
+            f"{detail}. Cihaza yazılmadı."
+        )

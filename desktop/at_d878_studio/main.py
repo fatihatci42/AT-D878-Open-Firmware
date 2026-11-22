@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-AT-D878 Studio - Modern, Advanced Open Firmware CPS & Multi-Flasher Suite
+AT-D878 Studio - Local channel tools, firmware analysis and safe package checks
 Designed for AnyTone AT-D878UVII Plus V4.00 (D878UV2A-BORD)
 Author: Open Firmware Team / TA5THK
 """
@@ -9,23 +9,27 @@ import sys
 import os
 import json
 import csv
+import math
+import itertools
+import hashlib
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QPushButton, QTableWidget, QTableWidgetItem, QStackedWidget,
+    QAbstractItemView,
     QStatusBar, QMessageBox, QComboBox, QFileDialog, QProgressBar,
     QTextEdit, QCheckBox, QGroupBox, QRadioButton, QButtonGroup,
     QLineEdit, QHeaderView, QFrame, QSpinBox, QSlider, QTabWidget,
     QSplitter, QGridLayout
 )
-from PySide6.QtCore import Qt, QThread, Signal, QTimer
-from PySide6.QtGui import QPixmap, QColor, QFont, QPainter, QBrush, QPen
+from PySide6.QtCore import Qt, QThread, Signal, QTimer, QSettings, QStandardPaths
+from PySide6.QtGui import QPixmap, QColor, QFont, QPainter, QBrush, QPen, QImageReader
 import serial.tools.list_ports
 
 _current_dir = os.path.dirname(os.path.abspath(__file__))
 if _current_dir not in sys.path:
     sys.path.insert(0, _current_dir)
 
-from comm.flasher import AnyToneFlasher, FLASH_APP_BASE
+from comm.flasher import AnyToneFlasher
 from comm.firmware_emulator import FirmwareEmulator, FirmwareReport
 from gui.theme import MODERN_STYLE
 
@@ -36,28 +40,73 @@ class FlasherThread(QThread):
     progress_signal = Signal(int, str)
     finished_signal = Signal(bool, str)
 
-    def __init__(self, port, baud, filepath, dry_run=True):
+    def __init__(self, port, baud, filepath, dry_run=True, target="mcu"):
         super().__init__()
         self.port = port
         self.baud = baud
         self.filepath = filepath
         self.dry_run = dry_run
+        self.target = target
 
     def run(self):
         flasher = AnyToneFlasher(self.port, self.baud)
-        if not self.dry_run:
-            ok, msg = flasher.connect()
-            if not ok:
-                self.finished_signal.emit(False, msg)
-                return
-
         def cb(pct, text):
             self.progress_signal.emit(pct, text)
 
-        ok, msg = flasher.flash_binary(self.filepath, progress_callback=cb, dry_run=self.dry_run)
-        if not self.dry_run:
+        try:
+            ok, msg = flasher.flash_binary(
+                self.filepath,
+                progress_callback=cb,
+                dry_run=self.dry_run,
+                target=self.target,
+            )
+        except Exception as exc:
+            ok, msg = False, f"Ön kontrol başarısız: {exc}"
+        finally:
             flasher.disconnect()
         self.finished_signal.emit(ok, msg)
+
+
+class HandshakeThread(QThread):
+    result_signal = Signal(str, bool, str, str, str)
+
+    def __init__(self, port, baud):
+        super().__init__()
+        self.port = port
+        self.baud = baud
+
+    def run(self):
+        flasher = AnyToneFlasher(self.port, self.baud)
+        try:
+            ok, message = flasher.ping_device()
+            self.result_signal.emit(
+                self.port, ok, message, flasher.model_info, flasher.hw_version
+            )
+        except Exception as exc:
+            self.result_signal.emit(self.port, False, f"Bağlantı testi başarısız: {exc}", "", "")
+        finally:
+            flasher.disconnect()
+
+
+class FirmwareAnalysisThread(QThread):
+    result_signal = Signal(object)
+
+    def __init__(self, filepath, max_cycles=5000):
+        super().__init__()
+        self.filepath = filepath
+        self.max_cycles = max_cycles
+
+    def run(self):
+        emulator = FirmwareEmulator()
+        try:
+            report = emulator.analyze_and_emulate(self.filepath, max_cycles=self.max_cycles)
+        except Exception as exc:
+            report = FirmwareReport()
+            report.filepath = self.filepath
+            report.vector_check_msg = f"Analiz hatası: {exc}"
+            report.emulation_status = "Başlatılamadı"
+            report.emulation_error = str(exc)
+        self.result_signal.emit(report)
 
 
 # -----------------------------------------------------------------------------
@@ -480,7 +529,7 @@ class RadioLCDWidget(QWidget):
         painter.setFont(QFont("Segoe UI", 6, QFont.Bold))
         if self.is_tx:
             painter.setPen(QColor("#FCA5A5"))
-            painter.drawText(50, 125, "● TRANSMIT (TX)")
+            painter.drawText(50, 125, "● TX SIM")
         else:
             painter.drawText(10, 124, "Menü")
             painter.drawText(68, 124, "Bölge")
@@ -574,7 +623,7 @@ class AnyToneHandsetWidget(QFrame):
 
         # PF3 Tepe Yeşil Tuşu
         btn_pf3 = QPushButton("PF3")
-        btn_pf3.setToolTip("PF3: APRS Konum Paketi Gönder / Alarm")
+        btn_pf3.setToolTip("PF3 yerel önizleme; RF yayını yapılmaz")
         btn_pf3.setFixedSize(34, 36)
         btn_pf3.setStyleSheet("""
             QPushButton {
@@ -838,9 +887,7 @@ class AnyToneHandsetWidget(QFrame):
             self.lcd.update()
 
     def on_pf3_click(self):
-        # PF3 tuşlandığında APRS konumunu gönder
-        self.lcd.battery_volts = "7.6V"
-        self.lcd.update()
+        self.window().statusBar().showMessage("PF3 maket eylemi: APRS/RF gönderimi yapılmadı.", 4000)
 
 
 # -----------------------------------------------------------------------------
@@ -849,26 +896,207 @@ class AnyToneHandsetWidget(QFrame):
 class ATD878Studio(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("AT-D878 Studio | Open Firmware CPS & Flasher v0.3.0 PRO")
+        self.setWindowTitle("AT-D878 Studio | Kanal, DMR ve firmware araçları v0.4.0")
         self.resize(1260, 840)
         self.setMinimumSize(1020, 700)
-        
-        if getattr(sys, 'frozen', False):
-            base_dir = os.path.dirname(sys.executable)
-            if os.path.exists(os.path.join(base_dir, "tools")):
-                self.project_root = base_dir
-            elif os.path.exists(os.path.join(base_dir, "..", "tools")):
-                self.project_root = os.path.abspath(os.path.join(base_dir, ".."))
-            else:
-                self.project_root = os.path.abspath(r"C:\Users\Fatih ATCI\Desktop\Anytone\AT-D878-Open-Firmware")
-        else:
-            self.project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+
+        self.settings = QSettings("AnyTone", "AT-D878 Studio")
+        self.workspace_dir = QStandardPaths.writableLocation(QStandardPaths.AppLocalDataLocation)
+        self.workspace_path = os.path.join(self.workspace_dir, "workspace.json")
+        self.workspace_data = self._read_workspace()
+        self.handshake_thread = None
+        self.flash_thread = None
+        self.analysis_thread = None
+        self.project_root = self._find_project_root()
         self.release_dir = os.path.join(self.project_root, "tools", "firmware_analyzer", "D878UVII PLUS V4.00 official release 250815")
         
         self.setStyleSheet(MODERN_STYLE)
         self.init_ui()
-        self.load_stock_codeplug_data()
-        self.load_sample_contacts()
+        self.autosave_timer = QTimer(self)
+        self.autosave_timer.setSingleShot(True)
+        self.autosave_timer.setInterval(700)
+        self.autosave_timer.timeout.connect(self._persist_workspace)
+        self.table_channels.itemChanged.connect(self._schedule_workspace_save)
+        self.table_contacts.itemChanged.connect(self._schedule_workspace_save)
+        self.port_combo.currentIndexChanged.connect(self._save_last_port)
+        self.persistent_controls = self._persistent_control_items()
+        self._restore_persistent_controls()
+        for _key, control in self.persistent_controls:
+            if isinstance(control, QComboBox):
+                control.currentIndexChanged.connect(self._schedule_workspace_save)
+            elif isinstance(control, QLineEdit):
+                control.textChanged.connect(self._schedule_workspace_save)
+            elif isinstance(control, QCheckBox):
+                control.toggled.connect(self._schedule_workspace_save)
+            elif isinstance(control, QSpinBox):
+                control.valueChanged.connect(self._schedule_workspace_save)
+        saved_geometry = self.settings.value("window/geometry")
+        if saved_geometry:
+            self.restoreGeometry(saved_geometry)
+        self._restore_last_port()
+        if not self._restore_table("data/channels", self.table_channels):
+            self.load_empty_channels()
+        if not self._restore_table("data/contacts", self.table_contacts):
+            self.load_sample_contacts()
+
+    @staticmethod
+    def _find_project_root():
+        if getattr(sys, "frozen", False):
+            executable_dir = os.path.dirname(os.path.abspath(sys.executable))
+            candidates = (
+                getattr(sys, "_MEIPASS", ""),
+                executable_dir,
+                os.path.abspath(os.path.join(executable_dir, "..")),
+            )
+            for candidate in candidates:
+                if candidate and os.path.isdir(candidate) and (
+                    os.path.isdir(os.path.join(candidate, "tools"))
+                    or os.path.isdir(os.path.join(candidate, "firmware"))
+                ):
+                    return os.path.abspath(candidate)
+            return executable_dir
+        candidates = (os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")),)
+        for candidate in candidates:
+            if candidate and os.path.isdir(candidate) and (
+                os.path.isdir(os.path.join(candidate, "tools"))
+                or os.path.isdir(os.path.join(candidate, "firmware"))
+            ):
+                return os.path.abspath(candidate)
+        return os.path.abspath(candidates[-1])
+
+    def _restore_last_port(self):
+        saved_port = self.settings.value("serial/last_port", "")
+        if not saved_port:
+            return
+        index = self.port_combo.findData(saved_port)
+        if index >= 0:
+            self.port_combo.setCurrentIndex(index)
+
+    def _save_last_port(self, _index=None):
+        port = self.port_combo.currentData()
+        if port:
+            self.settings.setValue("serial/last_port", port)
+
+    def _restore_table(self, key, table):
+        rows = self.workspace_data.get(key)
+        if not isinstance(rows, list):
+            return False
+        try:
+            if not isinstance(rows, list) or len(rows) > 10000:
+                return False
+            table.setRowCount(len(rows))
+            for row_index, row in enumerate(rows):
+                if not isinstance(row, list):
+                    continue
+                for column, value in enumerate(row[:table.columnCount()]):
+                    table.setItem(row_index, column, QTableWidgetItem(str(value or "")))
+            return bool(rows)
+        except (TypeError, ValueError):
+            return False
+
+    def _read_workspace(self):
+        try:
+            if not os.path.isfile(self.workspace_path) or os.path.getsize(self.workspace_path) > 64 * 1024 * 1024:
+                return {}
+            with open(self.workspace_path, "r", encoding="utf-8") as source:
+                data = json.load(source)
+            return data if isinstance(data, dict) else {}
+        except (OSError, UnicodeError, json.JSONDecodeError):
+            return {}
+
+    def _persistent_control_items(self):
+        items = [
+            ("aprs/frequency", self.combo_aprs_freq),
+            ("aprs/callsign", self.txt_aprs_call),
+            ("aprs/path", self.txt_aprs_path),
+            ("aprs/interval", self.combo_aprs_interval),
+            ("aprs/symbol", self.combo_aprs_sym),
+            ("aprs/comment", self.txt_aprs_comment),
+            ("aprs/dmr_slot", self.combo_dmr_ts),
+            ("aprs/dmr_tg", self.txt_dmr_aprs_tg),
+            ("aprs/roaming_enabled", self.chk_roam_auto),
+            ("aprs/roaming_distance", self.spin_roam_dist),
+            ("radio/mic_analog", self.spin_mic_a),
+            ("radio/mic_digital", self.spin_mic_d),
+            ("radio/backlight", self.combo_light),
+            ("radio/dim_shut", self.chk_dim_shut),
+            ("radio/boot_message", self.txt_boot_msg),
+        ]
+        items.extend((f"radio/key_assignment_{index}", control) for index, control in enumerate(self.key_assignment_combos))
+        return items
+
+    def _restore_persistent_controls(self):
+        saved = self.workspace_data.get("controls", {})
+        if not isinstance(saved, dict):
+            return
+        for key, control in self._persistent_control_items():
+            if key not in saved:
+                continue
+            value = saved[key]
+            if isinstance(control, QComboBox):
+                index = control.findText(str(value))
+                if index >= 0:
+                    control.setCurrentIndex(index)
+            elif isinstance(control, QLineEdit):
+                control.setText(str(value))
+            elif isinstance(control, QCheckBox):
+                control.setChecked(bool(value))
+            elif isinstance(control, QSpinBox):
+                try:
+                    control.setValue(int(value))
+                except (TypeError, ValueError):
+                    pass
+
+    def _schedule_workspace_save(self, *_args):
+        if hasattr(self, "autosave_timer"):
+            self.autosave_timer.start()
+
+    def _persist_workspace(self):
+        for key, table in (("data/channels", self.table_channels), ("data/contacts", self.table_contacts)):
+            rows = []
+            for row_index in range(table.rowCount()):
+                rows.append([
+                    table.item(row_index, column).text() if table.item(row_index, column) else ""
+                    for column in range(table.columnCount())
+                ])
+            self.workspace_data[key] = rows
+        self.workspace_data["controls"] = {
+            key: control.currentText() if isinstance(control, QComboBox)
+            else control.text() if isinstance(control, QLineEdit)
+            else control.isChecked() if isinstance(control, QCheckBox)
+            else control.value()
+            for key, control in self.persistent_controls
+        }
+        try:
+            os.makedirs(self.workspace_dir, exist_ok=True)
+            temporary_path = self.workspace_path + ".tmp"
+            with open(temporary_path, "w", encoding="utf-8") as destination:
+                json.dump(self.workspace_data, destination, ensure_ascii=False, separators=(",", ":"))
+            os.replace(temporary_path, self.workspace_path)
+        except OSError as exc:
+            self.statusBar().showMessage(f"Çalışma verileri kaydedilemedi: {exc}", 10000)
+
+    def closeEvent(self, event):
+        active_threads = [thread for thread in (self.handshake_thread, self.flash_thread, self.analysis_thread) if thread and thread.isRunning()]
+        if active_threads:
+            reply = QMessageBox.question(
+                self,
+                "Devam eden işlem",
+                "Bir bağlantı veya ön kontrol işlemi sürüyor. Tamamlanmasını bekleyerek çıkılsın mı?",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.Yes,
+            )
+            if reply != QMessageBox.Yes:
+                event.ignore()
+                return
+            for thread in active_threads:
+                thread.wait()
+        self.settings.setValue("window/geometry", self.saveGeometry())
+        if hasattr(self, "autosave_timer"):
+            self.autosave_timer.stop()
+        self._persist_workspace()
+        self.settings.sync()
+        event.accept()
 
     def init_ui(self):
         central_widget = QWidget()
@@ -920,15 +1148,15 @@ class ATD878Studio(QMainWindow):
         btn_refresh.clicked.connect(self.refresh_ports)
         port_box.addWidget(btn_refresh)
 
-        btn_connect = QPushButton("🔗 Bağlan & Test Et")
-        btn_connect.setProperty("class", "success")
-        btn_connect.setToolTip("AnyTone Telsiz ile USB üzerinden el sıkış ve model doğrula")
-        btn_connect.clicked.connect(self.test_device_handshake)
-        port_box.addWidget(btn_connect)
+        self.btn_connect = QPushButton("🔗 Bağlan & Test Et")
+        self.btn_connect.setProperty("class", "success")
+        self.btn_connect.setToolTip("AnyTone Telsiz ile USB üzerinden el sıkış ve model doğrula")
+        self.btn_connect.clicked.connect(self.test_device_handshake)
+        port_box.addWidget(self.btn_connect)
 
-        btn_import_rdt = QPushButton("Kod Fişi İçe Aktar (.rdt)")
+        btn_import_rdt = QPushButton("RDT Dosyasını İncele")
         btn_import_rdt.setProperty("class", "primary")
-        btn_import_rdt.clicked.connect(self.load_stock_codeplug_data)
+        btn_import_rdt.clicked.connect(self.inspect_codeplug_rdt)
         port_box.addWidget(btn_import_rdt)
 
         header_layout.addLayout(port_box)
@@ -949,7 +1177,7 @@ class ATD878Studio(QMainWindow):
 
         self.btn_nav_dash = QPushButton("📊 Cihaz Paneli")
         self.btn_nav_chan = QPushButton("📻 Kanallar & VFO")
-        self.btn_nav_cont = QPushButton("👥 DMR Kişiler (500k)")
+        self.btn_nav_cont = QPushButton("👥 DMR Kişiler")
         self.btn_nav_aprs = QPushButton("📡 APRS & GPS Dolaşım")
         self.btn_nav_keys = QPushButton("🎛️ Cihaz Ayarları & Tuşlar")
         self.btn_nav_sim  = QPushButton("📺 Telsiz LCD Simülatörü")
@@ -994,7 +1222,7 @@ class ATD878Studio(QMainWindow):
         body_layout.addWidget(self.pages)
         root_layout.addWidget(body)
 
-        self.statusBar().showMessage("Sistem hazır. AnyTone AT-D878UVII Plus v4.00 profili yüklendi.")
+        self.statusBar().showMessage("Studio hazır. Kanal ve kişi tabloları bu bilgisayarda saklanır; telsiz bağlantısı ayrı doğrulanır.")
         self.switch_page(0)
 
     def switch_page(self, index):
@@ -1009,10 +1237,11 @@ class ATD878Studio(QMainWindow):
         page = QWidget()
         layout = QVBoxLayout(page)
         layout.setSpacing(14)
+        layout.addWidget(QLabel("Bu panel proje hedef profilini gösterir; canlı telsiz telemetrisi değildir."))
 
         cards_layout = QHBoxLayout()
         cards = [
-            ("HEDEF CİHAZ", "AT-D878UVII Plus", "#38BDF8"),
+            ("HEDEF PROFİL", "AT-D878UVII Plus", "#38BDF8"),
             ("KART REVİZYONU", "D878UV2A-BORD", "#818CF8"),
             ("ANA İŞLEMCİ", "GD32F303VGT6 (120MHz)", "#34D399"),
             ("ÇAĞRI KODU", "TA5THK", "#FBBF24")
@@ -1031,13 +1260,13 @@ class ATD878Studio(QMainWindow):
         layout.addLayout(cards_layout)
 
         # Bellek Haritası
-        group_mem = QGroupBox("Flash & Bellek Mimarisi (Güvenlik Korumalı)")
+        group_mem = QGroupBox("Proje bellek haritası (referans; cihazdan okunmadı)")
         m_lay = QVBoxLayout(group_mem)
         mem_items = [
-            ("0x08000000 - 0x08003FFF (16 KB)", "Orijinal AnyTone ROM Bootloader", "#EF4444", "KORUMALI (Asla silinmez / Değiştirilmez)"),
-            ("0x08004000 - 0x080FFFFF (1008 KB)", "Uygulama Alanı (Açık Kaynak / Stok Firmware)", "#10B981", "YAZILABİLİR (GD32 Flash Bölgesi)"),
+            ("0x08000000 - 0x08003FFF (16 KB)", "Üretici boot alanı (proje varsayımı)", "#EF4444", "Bu uygulama yazma yapmaz"),
+            ("0x08004000 - 0x080FFFFF (1008 KB)", "Uygulama alanı (adres profili)", "#10B981", "Harita cihazda doğrulanmadı"),
             ("0x20000000 - 0x20017FFF (96 KB)", "Dahili SRAM (Stack & Heap & DMA Framebuffer)", "#38BDF8", "RAM (Değişkenler & 40KB Ekran Tamponu)"),
-            ("Harici SPI Flash (256 MB)", "İkon Paketi (3.7MB) + 500.000 DMR Rehber Veritabanı", "#FBBF24", "SPI FLASH (Kullanıcı Verileri)")
+            ("Harici flash", "İkon paketi / kullanıcı verileri", "#FBBF24", "Kapasite cihazda doğrulanmadı")
         ]
         for addr, name, col, desc in mem_items:
             row = QHBoxLayout()
@@ -1054,14 +1283,14 @@ class ATD878Studio(QMainWindow):
         layout.addWidget(group_mem)
 
         # Donanım Katmanları
-        group_specs = QGroupBox("Doğrulanan Donanım Katmanları & Entegreler")
+        group_specs = QGroupBox("Proje donanım notları (telsizden okunmadı)")
         specs_layout = QVBoxLayout(group_specs)
         specs = [
-            "✔ <b>RF Alıcı/Verici (Transceiver):</b> Auctus 1846N (134-174 MHz VHF + 400-520 MHz UHF) [Pinler: PB1, PB2]",
-            "✔ <b>DMR Baseband & Vocoder:</b> Sicomm/CML SCT3258TD (Donanımsal AMBE+2 Vocoder) [HPI Portu: PE0-PE7]",
-            "✔ <b>Ekran Denetleyicisi:</b> 1.77 inç Renkli TFT LCD (160x128 RGB565) [Pinler: PC3, PC4, PC5, PC10]",
-            "✔ <b>Alt Kart (LinkBoard):</b> Analog 1200 Baud APRS RX Demodülatör & Bluetooth Ses Modülü [BHT V2.00]",
-            "✔ <b>Ses Codec & Güç:</b> Texas Instruments TLV320AIC3204 & Ses Susturma (Mute) [Pin: PA7]"
+            "• <b>RF profili:</b> Auctus 1846N (proje notlarında belirtilen) [PB1, PB2]",
+            "• <b>DMR baseband:</b> Sicomm/CML SCT3258TD (proje notlarında belirtilen) [PE0–PE7]",
+            "• <b>Ekran profili:</b> 1.77 inç TFT, 160×128 (proje notlarında belirtilen)",
+            "• <b>Alt kart:</b> LinkBoard BHT V2.00 (proje notlarında belirtilen)",
+            "• <b>Ses profili:</b> TLV320AIC3204 (proje notlarında belirtilen)"
         ]
         for s in specs:
             lbl = QLabel(s)
@@ -1081,7 +1310,7 @@ class ATD878Studio(QMainWindow):
         top_bar = QHBoxLayout()
         self.chan_search = QLineEdit()
         self.chan_search.setPlaceholderText("🔍 Kanal adı, frekans veya mod ara...")
-        self.chan_search.setMaximumWidth(320)
+        self.chan_search.setMaximumWidth(260)
         self.chan_search.textChanged.connect(self.filter_channels)
         top_bar.addWidget(self.chan_search)
         top_bar.addStretch()
@@ -1089,18 +1318,29 @@ class ATD878Studio(QMainWindow):
         btn_add = QPushButton("+ Yeni Kanal Ekle")
         btn_add.clicked.connect(self.add_channel_row)
         top_bar.addWidget(btn_add)
+
+        btn_remove = QPushButton("Seçileni Sil")
+        btn_remove.clicked.connect(lambda: self.delete_selected_rows(self.table_channels, "kanal"))
+        top_bar.addWidget(btn_remove)
+
+        btn_import = QPushButton("CSV İçe Aktar")
+        btn_import.clicked.connect(self.import_channels_csv)
+        top_bar.addWidget(btn_import)
         
         btn_export = QPushButton("CSV Dışa Aktar")
         btn_export.clicked.connect(self.export_channels_csv)
         top_bar.addWidget(btn_export)
         
         layout.addLayout(top_bar)
+        layout.addWidget(QLabel("Yerel kanal çalışma listesi · CSV ile içe aktarın veya yeni kanal ekleyin · değişiklikler bu bilgisayarda saklanır · telsize yazma kapalı"))
 
         self.table_channels = QTableWidget(0, 8)
         self.table_channels.setHorizontalHeaderLabels([
             "No", "Kanal Adı", "RX Frekansı (MHz)", "TX Frekansı (MHz)", "Mod", "Güç Seviyesi", "Bant Genişliği", "Ton / Renk Kodu / TG"
         ])
         self.table_channels.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        self.table_channels.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.table_channels.setSelectionMode(QAbstractItemView.ExtendedSelection)
         self.table_channels.setAlternatingRowColors(True)
         layout.addWidget(self.table_channels)
         return page
@@ -1128,12 +1368,106 @@ class ATD878Studio(QMainWindow):
         self.table_channels.setItem(r, 6, QTableWidgetItem("25 kHz"))
         self.table_channels.setItem(r, 7, QTableWidgetItem("CSQ"))
 
+    def delete_selected_rows(self, table, record_type):
+        selected_rows = sorted({item.row() for item in table.selectedItems()}, reverse=True)
+        if not selected_rows:
+            QMessageBox.information(self, "Seçim Yok", f"Silmek için en az bir {record_type} satırı seçin.")
+            return
+        reply = QMessageBox.question(
+            self,
+            "Satırları Sil",
+            f"Seçili {len(selected_rows)} {record_type} satırı silinsin mi?",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if reply != QMessageBox.Yes:
+            return
+        for row in selected_rows:
+            table.removeRow(row)
+        self._schedule_workspace_save()
+
+    def import_channels_csv(self):
+        path, _ = QFileDialog.getOpenFileName(self, "Kanal CSV Dosyası Seç", self.project_root, "CSV Dosyası (*.csv)")
+        if not path:
+            return
+        aliases = {
+            "no": 0, "number": 0, "channelno": 0, "channelnumber": 0,
+            "kanaladı": 1, "channelname": 1, "channel": 1, "kanal": 1, "name": 1,
+            "rxfrekansımhz": 2, "rxfrekansı": 2, "rxfreq": 2, "rxfrequency": 2, "receivefrequency": 2,
+            "txfrekansımhz": 3, "txfrekansı": 3, "txfreq": 3, "txfrequency": 3, "transmitfrequency": 3,
+            "mod": 4, "mode": 4, "modulation": 4,
+            "güçseviyesi": 5, "power": 5, "powerlevel": 5,
+            "bantgenişliği": 6, "bandwidth": 6,
+            "tonrenkkodutg": 7, "tone": 7, "colorcodetg": 7, "colorcode": 7,
+        }
+
+        def normalize_header(value):
+            return "".join(ch for ch in value.casefold() if ch.isalnum())
+
+        try:
+            with open(path, "r", newline="", encoding="utf-8-sig") as stream:
+                sample = stream.read(8192)
+                stream.seek(0)
+                try:
+                    dialect = csv.Sniffer().sniff(sample, delimiters=",;\t")
+                except csv.Error:
+                    dialect = csv.excel
+                rows = list(csv.reader(stream, dialect))
+            if not rows:
+                raise ValueError("Dosyada satır bulunamadı.")
+            normalized = [normalize_header(value) for value in rows[0]]
+            normalized_aliases = {normalize_header(key): value for key, value in aliases.items()}
+            header_map = {normalized_aliases[value]: index for index, value in enumerate(normalized) if value in normalized_aliases}
+            has_header = 2 in header_map and 3 in header_map and 1 in header_map
+            data_rows = rows[1:] if has_header else rows
+            if len(data_rows) > 10000:
+                raise ValueError("Güvenlik sınırı aşıldı: tek seferde en fazla 10.000 kanal alınabilir.")
+
+            imported = []
+            for source_row, values in enumerate(data_rows, start=2 if has_header else 1):
+                if not values or not any(value.strip() for value in values):
+                    continue
+                if has_header:
+                    row = [values[header_map[index]].strip() if index in header_map and header_map[index] < len(values) else "" for index in range(8)]
+                else:
+                    row = [values[i].strip() if i < len(values) else "" for i in range(8)]
+                row[0] = row[0] or str(len(imported) + 1)
+                row[4] = row[4].upper() or "FM"
+                if row[4] in ("ANALOG", "ANALOGUE"):
+                    row[4] = "FM"
+                elif row[4] == "DIGITAL":
+                    row[4] = "DMR"
+                try:
+                    rx, tx = float(row[2].replace(",", ".")), float(row[3].replace(",", "."))
+                except ValueError as exc:
+                    raise ValueError(f"Satır {source_row}: RX/TX frekansı sayı olmalı.") from exc
+                valid_band = lambda freq: math.isfinite(freq) and (134.0 <= freq <= 174.0 or 400.0 <= freq <= 520.0)
+                if not valid_band(rx) or not valid_band(tx):
+                    raise ValueError(f"Satır {source_row}: frekans 134–174 veya 400–520 MHz aralığında olmalı.")
+                if not row[1] or len(row[1]) > 16:
+                    raise ValueError(f"Satır {source_row}: kanal adı 1–16 karakter olmalı.")
+                if row[4] not in ("FM", "DMR"):
+                    raise ValueError(f"Satır {source_row}: mod FM veya DMR olmalı.")
+                row[2], row[3] = f"{rx:.5f}", f"{tx:.5f}"
+                imported.append(row)
+
+            if not imported:
+                raise ValueError("İçe aktarılabilir kanal bulunamadı.")
+            self.table_channels.setRowCount(len(imported))
+            for row_index, values in enumerate(imported):
+                for column, value in enumerate(values):
+                    self.table_channels.setItem(row_index, column, QTableWidgetItem(value))
+            self.filter_channels(self.chan_search.text())
+            QMessageBox.information(self, "CSV İçe Aktarıldı", f"{len(imported)} kanal doğrulandı ve tabloya yüklendi.\n\nBu işlem telsize yazma yapmadı.")
+        except (OSError, csv.Error, UnicodeError, ValueError) as exc:
+            QMessageBox.critical(self, "Kanal CSV Hatası", str(exc))
+
     def export_channels_csv(self):
         path, _ = QFileDialog.getSaveFileName(self, "Kanal Listesi CSV Kaydet", self.project_root, "CSV Dosyası (*.csv)")
         if not path:
             return
         try:
-            with open(path, "w", newline="", encoding="utf-8") as f:
+            with open(path, "w", newline="", encoding="utf-8-sig") as f:
                 writer = csv.writer(f)
                 headers = [self.table_channels.horizontalHeaderItem(c).text() for c in range(self.table_channels.columnCount())]
                 writer.writerow(headers)
@@ -1152,9 +1486,8 @@ class ATD878Studio(QMainWindow):
         layout = QVBoxLayout(page)
 
         desc_lbl = QLabel(
-            "<b>DMR Dijital Kişiler (RadioID.net Veritabanı):</b> "
-            "AnyTone D878UVII Plus cihazı harici SPI Flash üzerinde 500.000 dijital kişi hafızasına sahiptir. "
-            "Gelen çağrılarda çağrı işareti, isim, şehir ve ülke otomatik olarak ekranda görünür."
+            "<b>DMR kişi listesi önizlemesi:</b> JSON veya CSV dosyalarını içe aktarın, arayın ve bu bilgisayardaki Studio oturumunda saklayın. "
+            "Bu ekran ağdan RadioID indirmez ve listeyi telsize yazmaz."
         )
         desc_lbl.setStyleSheet("color: #94A3B8; font-size: 12px; margin-bottom: 6px;")
         desc_lbl.setWordWrap(True)
@@ -1163,10 +1496,18 @@ class ATD878Studio(QMainWindow):
         top_bar = QHBoxLayout()
         self.contact_search = QLineEdit()
         self.contact_search.setPlaceholderText("🔍 DMR ID, Çağrı Kodu veya İsim ara...")
-        self.contact_search.setMaximumWidth(320)
+        self.contact_search.setMaximumWidth(240)
         self.contact_search.textChanged.connect(self.filter_contacts)
         top_bar.addWidget(self.contact_search)
         top_bar.addStretch()
+
+        btn_add_contact = QPushButton("+ Kişi Ekle")
+        btn_add_contact.clicked.connect(self.add_contact_row)
+        top_bar.addWidget(btn_add_contact)
+
+        btn_remove_contact = QPushButton("Seçileni Sil")
+        btn_remove_contact.clicked.connect(lambda: self.delete_selected_rows(self.table_contacts, "kişi"))
+        top_bar.addWidget(btn_remove_contact)
 
         btn_import_json = QPushButton("RadioID JSON İçe Aktar")
         btn_import_json.clicked.connect(self.import_radioid_json)
@@ -1176,6 +1517,10 @@ class ATD878Studio(QMainWindow):
         btn_import_csv.clicked.connect(self.import_radioid_csv)
         top_bar.addWidget(btn_import_csv)
 
+        btn_export_csv = QPushButton("CSV Dışa Aktar")
+        btn_export_csv.clicked.connect(self.export_contacts_csv)
+        top_bar.addWidget(btn_export_csv)
+
         layout.addLayout(top_bar)
 
         self.table_contacts = QTableWidget(0, 6)
@@ -1183,32 +1528,14 @@ class ATD878Studio(QMainWindow):
             "DMR ID", "Çağrı Kodu", "İsim", "Şehir", "Ülke", "Tür / Açıklama"
         ])
         self.table_contacts.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        self.table_contacts.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.table_contacts.setSelectionMode(QAbstractItemView.ExtendedSelection)
         self.table_contacts.setAlternatingRowColors(True)
         layout.addWidget(self.table_contacts)
         return page
 
     def load_sample_contacts(self):
-        sample_data = [
-            ("286", "TG 286", "Turkiye Ulusal TalkGroup", "Ankara", "Turkey", "Group Call"),
-            ("28601", "TG 28601", "Adana DMR Grubu", "Adana", "Turkey", "Group Call"),
-            ("28606", "TG 28606", "Ankara DMR Grubu", "Ankara", "Turkey", "Group Call"),
-            ("28634", "TG 28634", "Istanbul DMR Grubu", "Istanbul", "Turkey", "Group Call"),
-            ("28635", "TG 28635", "Izmir DMR Grubu", "Izmir", "Turkey", "Group Call"),
-            ("911", "TG 911", "Uluslararasi Acil Durum", "Global", "International", "Emergency"),
-            ("112", "TG 112", "Turkiye Acil Durum Afet", "Ulusal", "Turkey", "Emergency"),
-            ("2860001", "TA5THK", "Fatih ATCI", "Adana", "Turkey", "Private Call"),
-            ("2861002", "TA1ABC", "Ahmet Yilmaz", "Istanbul", "Turkey", "Private Call"),
-            ("2862003", "TA2DEF", "Mehmet Kaya", "Ankara", "Turkey", "Private Call"),
-        ]
-        self.table_contacts.setRowCount(len(sample_data))
-        for r, row in enumerate(sample_data):
-            for c, val in enumerate(row):
-                it = QTableWidgetItem(val)
-                if c == 1:
-                    it.setForeground(QColor("#FBBF24"))
-                elif c == 5 and "Emergency" in val:
-                    it.setForeground(QColor("#EF4444"))
-                self.table_contacts.setItem(r, c, it)
+        self.table_contacts.setRowCount(0)
 
     def filter_contacts(self, query):
         q = query.lower()
@@ -1221,6 +1548,32 @@ class ATD878Studio(QMainWindow):
                     break
             self.table_contacts.setRowHidden(r, not match)
 
+    def add_contact_row(self):
+        row = self.table_contacts.rowCount()
+        self.table_contacts.insertRow(row)
+        self.table_contacts.setItem(row, 0, QTableWidgetItem(""))
+        for column in range(1, self.table_contacts.columnCount()):
+            self.table_contacts.setItem(row, column, QTableWidgetItem(""))
+        self.table_contacts.setCurrentCell(row, 0)
+        self.table_contacts.editItem(self.table_contacts.item(row, 0))
+
+    def export_contacts_csv(self):
+        path, _ = QFileDialog.getSaveFileName(self, "Kişi Listesi CSV Kaydet", self.project_root, "CSV Dosyası (*.csv)")
+        if not path:
+            return
+        try:
+            with open(path, "w", newline="", encoding="utf-8-sig") as stream:
+                writer = csv.writer(stream)
+                writer.writerow([self.table_contacts.horizontalHeaderItem(column).text() for column in range(6)])
+                for row in range(self.table_contacts.rowCount()):
+                    writer.writerow([
+                        self.table_contacts.item(row, column).text() if self.table_contacts.item(row, column) else ""
+                        for column in range(6)
+                    ])
+            QMessageBox.information(self, "CSV Dışa Aktarıldı", f"{self.table_contacts.rowCount()} kişi satırı kaydedildi.\n{path}")
+        except OSError as exc:
+            QMessageBox.critical(self, "CSV Dışa Aktarma Hatası", str(exc))
+
     def import_radioid_json(self):
         path, _ = QFileDialog.getOpenFileName(self, "RadioID JSON Seç", self.project_root, "JSON Dosyaları (*.json)")
         if not path:
@@ -1228,38 +1581,124 @@ class ATD878Studio(QMainWindow):
         try:
             with open(path, "r", encoding="utf-8") as f:
                 data = json.load(f)
-            users = data.get("users", [])
-            if not users and isinstance(data, list):
+            if isinstance(data, list):
                 users = data
-            self.table_contacts.setRowCount(len(users[:1000])) # İlk 1000 kayıt önizleme
-            for r, u in enumerate(users[:1000]):
-                self.table_contacts.setItem(r, 0, QTableWidgetItem(str(u.get("id", ""))))
-                self.table_contacts.setItem(r, 1, QTableWidgetItem(str(u.get("callsign", ""))))
-                self.table_contacts.setItem(r, 2, QTableWidgetItem(str(u.get("name", ""))))
-                self.table_contacts.setItem(r, 3, QTableWidgetItem(str(u.get("city", ""))))
-                self.table_contacts.setItem(r, 4, QTableWidgetItem(str(u.get("country", ""))))
-                self.table_contacts.setItem(r, 5, QTableWidgetItem(str(u.get("remarks", "Private Call"))))
-            QMessageBox.information(self, "Başarılı", f"{len(users)} kişi veritabanından başarıyla ayrıştırıldı!")
-        except Exception as e:
-            QMessageBox.critical(self, "Hata", f"JSON ayrıştırma hatası: {e}")
+            elif isinstance(data, dict):
+                users = data.get("users", data.get("contacts", data.get("results", [])))
+            else:
+                raise ValueError("JSON kökü bir kişi listesi veya users/contacts/results alanı olmalı.")
+            if not isinstance(users, list):
+                raise ValueError("JSON içindeki kişi alanı liste biçiminde değil.")
+            records = [self._contact_to_row(user) for user in users if isinstance(user, dict)]
+            self._load_contact_rows(records)
+        except (OSError, UnicodeError, json.JSONDecodeError, ValueError) as exc:
+            QMessageBox.critical(self, "JSON İçe Aktarma Hatası", str(exc))
+
+    @staticmethod
+    def _contact_to_row(record):
+        def normalize(value):
+            return "".join(character for character in str(value).casefold() if character.isalnum())
+
+        values = {normalize(key): value for key, value in record.items()}
+
+        def field(*keys):
+            for key in keys:
+                value = values.get(normalize(key))
+                if value not in (None, ""):
+                    return str(value).strip()
+            return ""
+
+        name = field("name", "fullname", "displayname")
+        if not name:
+            name = " ".join(part for part in (field("firstname", "fname", "first"), field("lastname", "surname", "lname", "last")) if part)
+        return [
+            field("id", "radioid", "dmrid", "radio_id"),
+            field("callsign", "call", "callsign"),
+            name,
+            field("city", "town"),
+            field("country"),
+            field("remarks", "type", "description"),
+        ]
+
+    def _load_contact_rows(self, records):
+        visible = []
+        record_count = 0
+        for row in records:
+            if not any(value for value in row):
+                continue
+            record_count += 1
+            if len(visible) < 1000:
+                visible.append(row)
+        if not record_count:
+            raise ValueError("İçe aktarılabilir kişi kaydı bulunamadı.")
+        self.table_contacts.setRowCount(len(visible))
+        for row_index, values in enumerate(visible):
+            for column, value in enumerate(values):
+                self.table_contacts.setItem(row_index, column, QTableWidgetItem(value))
+        self.filter_contacts(self.contact_search.text())
+        shown = len(visible)
+        suffix = f" İlk {shown} kayıt gösteriliyor." if record_count > shown else ""
+        QMessageBox.information(
+            self,
+            "Kişi Listesi Yüklendi",
+            f"{record_count} kayıt ayrıştırıldı; {shown} kayıt Studio tablosuna yüklendi.{suffix}\n\nTelsize aktarım yapılmadı."
+        )
 
     def import_radioid_csv(self):
         path, _ = QFileDialog.getOpenFileName(self, "RadioID CSV Seç", self.project_root, "CSV Dosyaları (*.csv)")
         if not path:
             return
         try:
-            with open(path, "r", encoding="utf-8") as f:
-                reader = csv.reader(f)
-                rows = list(reader)
-            if not rows:
-                return
-            self.table_contacts.setRowCount(len(rows[1:]))
-            for r, row in enumerate(rows[1:]):
-                for c in range(min(6, len(row))):
-                    self.table_contacts.setItem(r, c, QTableWidgetItem(row[c]))
-            QMessageBox.information(self, "Başarılı", f"{len(rows)-1} kişi başarıyla içe aktarıldı!")
-        except Exception as e:
-            QMessageBox.critical(self, "Hata", f"CSV yükleme hatası: {e}")
+            def normalize(value):
+                return "".join(character for character in value.casefold() if character.isalnum())
+
+            field_names = {
+                "radioid", "id", "dmrid", "callsign", "firstname", "fname", "lastname", "surname",
+                "name", "city", "country", "remarks", "type", "description",
+            }
+            def read_csv(encoding):
+                with open(path, "r", newline="", encoding=encoding) as stream:
+                    sample = stream.read(8192)
+                    stream.seek(0)
+                    try:
+                        dialect = csv.Sniffer().sniff(sample, delimiters=",;\t")
+                    except csv.Error:
+                        dialect = csv.excel
+                    reader = csv.reader(stream, dialect)
+                    first = next(reader, None)
+                    if first is None:
+                        raise ValueError("CSV dosyası boş.")
+                    names = [normalize(value) for value in first]
+                    has_header = any(value in field_names for value in names)
+                    data_rows = reader if has_header else itertools.chain((first,), reader)
+                    header_indexes = {name: index for index, name in enumerate(names)}
+
+                    def row_records():
+                        for values in data_rows:
+                            if has_header:
+                                record = {
+                                    name: values[index] if index < len(values) else ""
+                                    for name, index in header_indexes.items()
+                                }
+                            else:
+                                record = {
+                                    "id": values[0] if len(values) > 0 else "",
+                                    "callsign": values[1] if len(values) > 1 else "",
+                                    "name": values[2] if len(values) > 2 else "",
+                                    "city": values[3] if len(values) > 3 else "",
+                                    "country": values[4] if len(values) > 4 else "",
+                                    "remarks": values[5] if len(values) > 5 else "",
+                                }
+                            yield self._contact_to_row(record)
+
+                    self._load_contact_rows(row_records())
+
+            try:
+                read_csv("utf-8-sig")
+            except UnicodeDecodeError:
+                read_csv("cp1254")
+        except (OSError, UnicodeError, csv.Error, ValueError) as exc:
+            QMessageBox.critical(self, "CSV İçe Aktarma Hatası", str(exc))
 
     # -------------------------------------------------------------
     # SAYFA 3: APRS VE GPS DOLAŞIM (ROAMING)
@@ -1267,12 +1706,13 @@ class ATD878Studio(QMainWindow):
     def create_aprs_page(self):
         page = QWidget()
         layout = QVBoxLayout(page)
+        layout.addWidget(QLabel("APRS alanları bu bilgisayardaki ayar taslağıdır; RF ve LinkBoard bağlantısı etkin değildir."))
 
         # Üst İki Sütunlu Kartlar
         h_split = QHBoxLayout()
 
         # Analog APRS Ayarları
-        group_analog = QGroupBox("Analog APRS Ayarları (1200 Baud AFSK)")
+        group_analog = QGroupBox("Analog APRS Ayar Taslağı (1200 Baud AFSK)")
         a_lay = QVBoxLayout(group_analog)
 
         row_freq = QHBoxLayout()
@@ -1347,19 +1787,18 @@ class ATD878Studio(QMainWindow):
         row_roam_dist.addWidget(self.spin_roam_dist)
         d_lay.addLayout(row_roam_dist)
 
-        d_lay.addWidget(QLabel("LinkBoard BHT Çip Durumu: <b>APRS RX Demodülatör Aktif</b>"))
+        d_lay.addWidget(QLabel("LinkBoard durumu: <b>Bu uygulamada bağlı değil</b>"))
         d_lay.addStretch()
 
         h_split.addWidget(group_dig)
         layout.addLayout(h_split)
 
-        # Canlı APRS RX Paket İzleyici
-        layout.addWidget(QLabel("<b>Canlı APRS Paket Trafiği (LinkBoard Demodülatör Çıktısı):</b>"))
+        # No verified LinkBoard APRS receive protocol is implemented in this app.
+        layout.addWidget(QLabel("<b>APRS alıcı durumu:</b>"))
         self.aprs_log = QTextEdit()
         self.aprs_log.setReadOnly(True)
         self.aprs_log.setMaximumHeight(150)
-        self.aprs_log.append("2026-11-22 18:40:12 [144.800 MHz] TA5THK-7>APAT81,WIDE1-1,WIDE2-1:!3700.12N/03519.45E[AnyTone Open FW 4.00")
-        self.aprs_log.append("2026-11-22 18:42:05 [144.800 MHz] TA1DX-9>APRS,WIDE2-2:/4101.20N/02858.30E>Mobil Istasyon")
+        self.aprs_log.setPlainText("Canlı RF/LinkBoard alımı bağlı değil. Bu Studio ekranı APRS alımını veya yayınını izlemiyor.")
         layout.addWidget(self.aprs_log)
 
         return page
@@ -1374,7 +1813,8 @@ class ATD878Studio(QMainWindow):
         h_split = QHBoxLayout()
 
         # Tuş Atamaları
-        group_keys = QGroupBox("Programlanabilir Fonksiyon Tuşları")
+        layout.addWidget(QLabel("Tuş ve cihaz ayarları yerel taslak olarak düzenlenir; bu ekrandan telsize yazılmaz."))
+        group_keys = QGroupBox("Programlanabilir Fonksiyon Tuşu Taslağı")
         k_lay = QVBoxLayout(group_keys)
 
         key_options = [
@@ -1382,6 +1822,7 @@ class ATD878Studio(QMainWindow):
             "Ters Frekans (Reverse)", "FM Radyo Aç/Kapa", "APRS Manuel Beacon Gönder",
             "Dim Shut (Ekran & LED Kapat)", "Tarama Başlat/Durdur", "Ses Kaydı Başlat", "Bölge Değiştir (Zone +/-)"
         ]
+        self.key_assignment_combos = []
 
         def make_row(lbl_text, default_idx):
             r = QHBoxLayout()
@@ -1389,6 +1830,7 @@ class ATD878Studio(QMainWindow):
             cb = QComboBox()
             cb.addItems(key_options)
             cb.setCurrentIndex(default_idx)
+            self.key_assignment_combos.append(cb)
             r.addWidget(cb)
             return r
 
@@ -1482,7 +1924,7 @@ class ATD878Studio(QMainWindow):
         c_lay.addLayout(btn_row_fw)
 
         # 2. Analiz & Emülasyon Başlatma Butonu
-        self.btn_run_emulation = QPushButton("🔬 Firmware'i Yükle & Simülatörde Canlandır")
+        self.btn_run_emulation = QPushButton("🔬 Firmware'i Analiz Et")
         self.btn_run_emulation.setProperty("class", "primary")
         self.btn_run_emulation.setMinimumHeight(42)
         self.btn_run_emulation.setStyleSheet("font-size: 13px; font-weight: 700;")
@@ -1490,17 +1932,17 @@ class ATD878Studio(QMainWindow):
         c_lay.addWidget(self.btn_run_emulation)
 
         # Emülasyon ve Analiz Konsolu
-        c_lay.addWidget(QLabel("<b>Cortex-M4 Donanım Analiz & Kayıtçı (Register) Raporu:</b>"))
+        c_lay.addWidget(QLabel("<b>Statik kontrol ve kısmi CPU emülasyon raporu:</b>"))
         self.sim_report_text = QTextEdit()
         self.sim_report_text.setReadOnly(True)
         self.sim_report_text.setMinimumHeight(240)
         self.sim_report_text.setStyleSheet("background-color: #05080E; border: 1px solid #1E293B; color: #10B981; font-family: 'Consolas', monospace; font-size: 11px;")
-        self.sim_report_text.append("[*] AnyTone AT-D878UVII Plus Donanım Simülatörü Hazır.")
-        self.sim_report_text.append("[*] Sağdaki telsiz kasası üzerinden doğrudan [-] (MENU), [--] (EXIT), [▲][▼] D-Pad ve Tuş Takımı ile menüyü canlı test edebilirsiniz.")
+        self.sim_report_text.append("[*] Yerel ön panel maketi hazır; tuşlar yalnızca ekrandaki arayüz durumunu değiştirir.")
+        self.sim_report_text.append("[*] Firmware analizi telsize bağlanmaz. Periferikler ve LCD firmware davranışı tam emüle edilmez.")
         c_lay.addWidget(self.sim_report_text)
 
         desc = QLabel(
-            "<b>Canlı Telsiz Donanım Laboratuvarı:</b><br>"
+            "<b>Etkileşimli ön panel maketi:</b><br>"
             "• <b>[-] MENU:</b> Ana menüyü açar veya seçilen ayara girer.<br>"
             "• <b>[▲] [▼] D-Pad:</b> Menüde gezinir veya VFO frekansını 12.5 kHz adımlar.<br>"
             "• <b>[--] EXIT:</b> Bir üst menüye döner veya VFO ekranına çıkar.<br>"
@@ -1520,7 +1962,7 @@ class ATD878Studio(QMainWindow):
         r_lay = QVBoxLayout(right_frame)
         r_lay.setContentsMargins(8, 8, 8, 8)
 
-        r_lay.addWidget(QLabel("<b>AnyTone AT-D878UVII Plus Fiziksel Ön Panel & Kasa:</b>"), alignment=Qt.AlignCenter)
+        r_lay.addWidget(QLabel("<b>AT-D878 tarzı yerel ön panel maketi:</b>"), alignment=Qt.AlignCenter)
         self.lcd_screen = RadioLCDWidget(scale=1.5)
         self.handset = AnyToneHandsetWidget(self.lcd_screen)
         r_lay.addWidget(self.handset, alignment=Qt.AlignCenter)
@@ -1535,12 +1977,16 @@ class ATD878Studio(QMainWindow):
         if os.path.exists(p):
             self.sim_fw_path = p
             self.sim_fw_label.setText(p)
+        else:
+            QMessageBox.information(self, "Açık Firmware Bulunamadı", "Derlenmiş firmware paketi bulunamadı. Önce bir paket oluşturun veya Özel Seç ile dosya açın.")
 
     def sim_select_stock_fw(self):
         p = os.path.join(self.project_root, "tools", "firmware_analyzer", "D878UVII_V4.00 FW", "D878UVII_V4.00_20250725.CDD")
         if os.path.exists(p):
             self.sim_fw_path = p
             self.sim_fw_label.setText(p)
+        else:
+            QMessageBox.information(self, "Stok Firmware Bulunamadı", "Stok firmware bu çalışma klasöründe yok. Dosyayı Özel Seç ile açabilirsiniz.")
 
     def sim_select_custom_fw(self):
         path, _ = QFileDialog.getOpenFileName(self, "Simülasyon İçin Firmware Seç", self.project_root, "Firmware Binary (*.CDD *.bin)")
@@ -1549,51 +1995,52 @@ class ATD878Studio(QMainWindow):
             self.sim_fw_label.setText(path)
 
     def run_firmware_analysis(self):
+        if self.analysis_thread and self.analysis_thread.isRunning():
+            self.statusBar().showMessage("Firmware analizi zaten sürüyor.", 4000)
+            return
         if not self.sim_fw_path or not os.path.exists(self.sim_fw_path):
             QMessageBox.critical(self, "Hata", "Lütfen geçerli bir firmware dosyası seçin!")
             return
 
         self.sim_report_text.clear()
         self.sim_report_text.append(f"[*] Firmware analiz ediliyor: {os.path.basename(self.sim_fw_path)}")
-        QApplication.processEvents()
+        self.btn_run_emulation.setEnabled(False)
+        self.analysis_thread = FirmwareAnalysisThread(self.sim_fw_path, max_cycles=5000)
+        self.analysis_thread.result_signal.connect(self.on_firmware_analysis_finished)
+        self.analysis_thread.start()
 
-        emu = FirmwareEmulator()
-        rep = emu.analyze_and_emulate(self.sim_fw_path, max_cycles=5000)
+    def on_firmware_analysis_finished(self, rep):
+        self.btn_run_emulation.setEnabled(True)
 
         # Konsola Rapor Yaz
         self.sim_report_text.append(f"-> Dosya Boyutu: {rep.filesize} Byte ({round(rep.filesize/1024, 2)} KB)")
         self.sim_report_text.append(f"-> Initial SP: 0x{rep.initial_sp:08X} | Reset Handler: 0x{rep.reset_handler:08X}")
-        self.sim_report_text.append(f"-> Güvenlik Analizi: {rep.safety_msg}")
+        self.sim_report_text.append(f"-> Vektör tablosu: {rep.vector_check_msg}")
 
-        if rep.is_safe:
-            self.sim_report_text.append(f"-> ARM Cortex-M4 Emülasyonu: {rep.cycles_executed} komut adımı yürütüldü.")
-            reg_str = " | ".join(f"{k}={v}" for k, v in rep.registers.items())
-            self.sim_report_text.append(f"-> CPU Kayıtçıları: {reg_str}")
-            self.sim_report_text.append(f"-> Algılanan Cihaz Modeli: {rep.detected_model}")
-            self.sim_report_text.append(f"-> Algılanan Çağrı Kodu: {rep.detected_callsign}")
-
-            # LCD Ekranını Güncelle
-            self.lcd_screen.vfo_a_freq = rep.vfo_a_freq
-            self.lcd_screen.vfo_b_freq = rep.vfo_b_freq
-            self.lcd_screen.vfo_a_name = f"VFO-A {rep.detected_callsign}"
-            self.lcd_screen.vfo_b_name = f"VFO-B {rep.detected_model[:10]}"
-            self.lcd_screen.update()
-
-            self.statusBar().showMessage(f"[✓] Firmware başarıyla analiz edildi ve LCD ekranına yansıtıldı! ({rep.detected_model})", 6000)
+        if rep.vectors_valid:
+            self.sim_report_text.append(f"-> Kısmi CPU emülasyonu: {rep.instructions_executed} komut; durum: {rep.emulation_status}.")
+            if rep.emulation_error:
+                self.sim_report_text.append(f"-> Emülasyon notu: {rep.emulation_error}")
+            if rep.registers:
+                reg_str = " | ".join(f"{key}={value}" for key, value in rep.registers.items())
+                self.sim_report_text.append(f"-> CPU kayıtçıları: {reg_str}")
+            self.sim_report_text.append(f"-> Metin taraması model eşleşmesi: {rep.detected_model}")
+            self.sim_report_text.append(f"-> Metin taraması çağrı kodu eşleşmesi: {rep.detected_callsign}")
+            self.sim_report_text.append("-> Not: Bu sonuç güvenlik sertifikası değildir; MMIO/periferik ve gerçek LCD davranışı modellenmiyor.")
+            self.statusBar().showMessage("Firmware vektör kontrolleri tamamlandı; emülasyon yalnızca kısmi CPU sandbox'ıdır.", 8000)
             QMessageBox.information(
-                self, "Firmware Analizi Başarılı",
-                f"Firmware başarıyla analiz edildi ve simüle edildi!\n\n"
+                self, "Temel Firmware Kontrolleri Tamamlandı",
                 f"• Dosya: {os.path.basename(rep.filepath)}\n"
-                f"• Boyut: {rep.filesize} Byte\n"
-                f"• Durum: 🟢 %100 GÜVENLİ (Bootloader Korumalı)\n"
-                f"• Initial SP: 0x{rep.initial_sp:08X}\n"
-                f"• Reset Handler: 0x{rep.reset_handler:08X}\n"
-                f"• Emüle Edilen Komut: {rep.cycles_executed} Adım\n\n"
-                f"Simülatör LCD ekranı güncellendi."
+                f"• Boyut: {rep.filesize} byte\n"
+                f"• Vektör kontrolleri: geçti\n"
+                f"• CPU emülasyon komut sayısı: {rep.instructions_executed}\n"
+                f"• Emülasyon durumu: {rep.emulation_status}\n\n"
+                "Bu analiz firmware güvenliğini veya telsizle uyumluluğunu kanıtlamaz; cihazda hiçbir işlem yapılmadı."
             )
         else:
-            self.sim_report_text.append(f"[!] HATA: {rep.safety_msg}")
-            QMessageBox.critical(self, "Güvenlik Uyarısı", rep.safety_msg)
+            self.sim_report_text.append(f"[!] Vektör kontrolü başarısız: {rep.vector_check_msg}")
+            self.statusBar().showMessage("Firmware vektör tablosu doğrulanamadı.", 8000)
+            QMessageBox.warning(self, "Firmware Ön Kontrolü Başarısız", rep.vector_check_msg)
 
     def sim_ptt_down(self):
         self.lcd_screen.is_tx = True
@@ -1615,7 +2062,7 @@ class ATD878Studio(QMainWindow):
         self.lcd_screen.update()
 
     def sim_send_aprs(self):
-        self.statusBar().showMessage("APRS Beacon paketi 144.800 MHz üzerinden gönderildi! (1200 Baud AFSK)", 4000)
+        self.statusBar().showMessage("APRS beacon önizlemesi seçildi; telsiz/LinkBoard bağlantısı olmadığı için RF yayını yapılmadı.", 6000)
 
     # -------------------------------------------------------------
     # SAYFA 6: AÇILIŞ EKRANI (BOOT SCREEN)
@@ -1639,11 +2086,11 @@ class ATD878Studio(QMainWindow):
         left.addWidget(btn_custom)
 
         desc = QLabel(
-            "<b>Format Gereksinimleri:</b><br>"
-            "• Çözünürlük: 160 x 128 Piksel<br>"
-            "• Renk Derinliği: 16-bit (RGB565)<br>"
-            "• Boyut: Tam olarak 21.558 Byte<br><br>"
-            "<i>Telsiz açıldığında ilk görünen karşılama ekranını belirler.</i>"
+            "<b>Önizleme için BMP profili:</b><br>"
+            "• Çözünürlük: 160 × 128 piksel<br>"
+            "• Renk: 8-bit paletli, sıkıştırmasız BMP<br>"
+            "• Dosya boyutu: 21.558 byte<br><br>"
+            "<i>Studio dosyayı doğrular ve önizler. Telsize gönderim bu sürümde desteklenmiyor.</i>"
         )
         desc.setStyleSheet("color: #94A3B8; font-size: 12px; margin-top: 10px;")
         left.addWidget(desc)
@@ -1729,8 +2176,10 @@ class ATD878Studio(QMainWindow):
         layout.addWidget(group_pkg)
 
         act_bar = QHBoxLayout()
-        self.chk_dry_run = QCheckBox("Simülasyon / Test Modu (Dry-Run) [Cihaza fiziksel yazma yapmaz]")
+        self.chk_dry_run = QCheckBox("Güvenli ön kontrol (dry-run) — cihaza yazma kapalı")
         self.chk_dry_run.setChecked(True)
+        self.chk_dry_run.setEnabled(False)
+        self.chk_dry_run.setToolTip("Gerçek yazma protokolü doğrulanmadığı için bu sürüm yalnızca dosya ön kontrolü yapar.")
         act_bar.addWidget(self.chk_dry_run)
         act_bar.addStretch()
 
@@ -1792,60 +2241,120 @@ class ATD878Studio(QMainWindow):
     # -------------------------------------------------------------
     def update_boot_instruction(self):
         if self.rb_mcu.isChecked():
-            self.info_box.setText("<b>Tuş Kombinasyonu:</b> Telsiz kapalıyken <b>PTT + Üst Alarm Tuşuna (PF3)</b> basılı tutarak açın. (Kırmızı LED yanıp söner, ekran kararır).")
+            instruction = "<b>Tuş Kombinasyonu:</b> Telsiz kapalıyken <b>PTT + Üst Alarm Tuşuna (PF3)</b> basılı tutarak açın. (Kırmızı LED yanıp söner, ekran kararır)."
         elif self.rb_icon.isChecked():
-            self.info_box.setText("<b>Tuş Kombinasyonu:</b> Telsiz kapalıyken <b>PTT + Alt Yan Tuşa (PF2)</b> basılı tutarak açın. (Ekranda 'UPDATE MODE' yazar).")
+            instruction = "<b>Tuş Kombinasyonu:</b> Telsiz kapalıyken <b>PTT + Alt Yan Tuşa (PF2)</b> basılı tutarak açın. (Ekranda 'UPDATE MODE' yazar)."
         elif self.rb_sct.isChecked():
-            self.info_box.setText("<b>Tuş Kombinasyonu:</b> Telsiz kapalıyken <b># Tuşu + Üst Tuşa (PF3)</b> basılı tutarak açın. (Ekranda 'WARNING This is Boot Mode for Sct!!!' yazar).")
-        elif self.rb_link.isChecked():
-            self.info_box.setText("<b>Tuş Kombinasyonu:</b> Telsiz kapalıyken <b>Üst Tuş (PF3) + Alt Yan Tuşa (PF2)</b> basılı tutarak açın. (Ekranda 'UPDATE MODE FOR LinkBoard' yazar).")
+            instruction = "<b>Tuş Kombinasyonu:</b> Telsiz kapalıyken <b># Tuşu + Üst Tuşa (PF3)</b> basılı tutarak açın. (Ekranda 'WARNING This is Boot Mode for Sct!!!' yazar)."
+        else:
+            instruction = "<b>Tuş Kombinasyonu:</b> Telsiz kapalıyken <b>Üst Tuş (PF3) + Alt Yan Tuşa (PF2)</b> basılı tutarak açın. (Ekranda 'UPDATE MODE FOR LinkBoard' yazar)."
+        self.info_box.setText(
+            instruction + "<br><b>Bu sürüm:</b> Yalnızca paket ön kontrolü yapar; hedefe özgü yazma protokolü henüz doğrulanmadı ve cihaza veri gönderilmez."
+        )
 
     def on_screen_selected(self, bmp_name):
         p = os.path.join(self.screens_dir, bmp_name)
         if os.path.exists(p):
-            self.bmp_preview.setPixmap(QPixmap(p))
+            error = self._load_boot_image(p)
+            if error:
+                QMessageBox.warning(self, "BMP Önizleme Hatası", f"Stok görsel doğrulanamadı:\n{error}")
 
     def select_custom_bmp(self):
         path, _ = QFileDialog.getOpenFileName(self, "BMP Resmi Seç", self.project_root, "Bitmap (*.bmp)")
         if path:
-            self.bmp_preview.setPixmap(QPixmap(path))
+            error = self._load_boot_image(path)
+            if error:
+                QMessageBox.warning(self, "Uyumsuz BMP", error)
 
-    def load_stock_codeplug_data(self):
-        rdt_path = os.path.join(self.project_root, "hardware", "backup_stock_codeplug.rdt")
-        if not os.path.exists(rdt_path):
+    def _load_boot_image(self, path):
+        try:
+            with open(path, "rb") as image_file:
+                header = image_file.read(54)
+                file_size = os.path.getsize(path)
+            if len(header) != 54 or header[:2] != b"BM":
+                return "Dosya geçerli bir BMP başlığı içermiyor."
+            declared_size = int.from_bytes(header[2:6], "little")
+            pixel_offset = int.from_bytes(header[10:14], "little")
+            dib_size = int.from_bytes(header[14:18], "little")
+            width = int.from_bytes(header[18:22], "little", signed=True)
+            height = int.from_bytes(header[22:26], "little", signed=True)
+            planes = int.from_bytes(header[26:28], "little")
+            bit_depth = int.from_bytes(header[28:30], "little")
+            compression = int.from_bytes(header[30:34], "little")
+            profile_ok = (
+                file_size == 21558 and declared_size == file_size and pixel_offset == 1078
+                and dib_size == 40 and width == 160 and height == 128 and planes == 1
+                and bit_depth == 8 and compression == 0
+            )
+            if not profile_ok:
+                return (
+                    "Beklenen profil: 21.558 byte, 160×128, 8-bit paletli ve sıkıştırmasız BMP. "
+                    f"Bulunan: {width}×{height}, {bit_depth}-bit, {file_size} byte."
+                )
+            reader = QImageReader(path)
+            reader.setDecideFormatFromContent(True)
+            image = reader.read()
+            if image.isNull():
+                return f"BMP çözümlenemedi: {reader.errorString()}"
+            self.bmp_preview.setPixmap(QPixmap.fromImage(image))
+            return ""
+        except OSError as exc:
+            return f"Dosya okunamadı: {exc}"
+
+    def load_empty_channels(self):
+        self.table_channels.setRowCount(0)
+
+    def inspect_codeplug_rdt(self):
+        path, _ = QFileDialog.getOpenFileName(
+            self, "AnyTone Kod Fişi İncele", self.project_root, "AnyTone Kod Fişi (*.rdt);;Binary Dosya (*.bin);;Tüm Dosyalar (*)"
+        )
+        if not path:
             return
-
-        items = [
-            ("1", "VFO-A 2M", "145.50000", "145.50000", "FM", "Turbo", "25 kHz", "CSQ"),
-            ("2", "VFO-B 70CM", "433.50000", "433.50000", "FM", "High", "25 kHz", "CSQ"),
-            ("3", "144.975 ECHOLINK", "144.97500", "144.97500", "FM", "Mid", "12.5 kHz", "Ton: 88.5"),
-            ("4", "432.875 ECHOLINK", "432.87500", "432.87500", "FM", "Mid", "12.5 kHz", "Ton: 88.5"),
-            ("5", "432.975 ECHOLINK", "432.97500", "432.97500", "FM", "Mid", "12.5 kHz", "Ton: 88.5"),
-            ("6", "TG ACIL AFET 112", "439.15000", "431.55000", "DMR", "Turbo", "12.5 kHz", "TG: 112 / CC: 1"),
-            ("7", "TG ACIL AFET 911", "439.15000", "431.55000", "DMR", "Turbo", "12.5 kHz", "TG: 911 / CC: 1"),
-            ("8", "TG DL-TURKIYE", "439.15000", "431.55000", "DMR", "Turbo", "12.5 kHz", "TG: 286 / CC: 1"),
-            ("9", "TG ADANA", "439.15000", "431.55000", "DMR", "Turbo", "12.5 kHz", "TG: 28601 / CC: 1"),
-            ("10", "TG AFYON", "439.15000", "431.55000", "DMR", "Turbo", "12.5 kHz", "TG: 28603 / CC: 1"),
-        ]
-
-        self.table_channels.setRowCount(len(items))
-        for row, item in enumerate(items):
-            for col, val in enumerate(item):
-                item_widget = QTableWidgetItem(val)
-                if col == 4:
-                    if val == "FM":
-                        item_widget.setForeground(QColor("#38BDF8"))
-                    else:
-                        item_widget.setForeground(QColor("#A78BFA"))
-                self.table_channels.setItem(row, col, item_widget)
+        try:
+            size = os.path.getsize(path)
+            if size > 64 * 1024 * 1024:
+                raise ValueError("Dosya 64 MiB sınırını aşıyor; incelenmedi.")
+            with open(path, "rb") as source:
+                data = source.read()
+            if not data:
+                raise ValueError("Dosya boş.")
+            lines = [
+                f"Dosya: {os.path.basename(path)}",
+                f"Boyut: {size:,} byte",
+                f"SHA-256: {hashlib.sha256(data).hexdigest()}",
+                "İlk 64 byte:",
+            ]
+            for offset in range(0, min(len(data), 64), 16):
+                block = data[offset:offset + 16]
+                hex_text = " ".join(f"{byte:02X}" for byte in block)
+                ascii_text = "".join(chr(byte) if 32 <= byte <= 126 else "." for byte in block)
+                lines.append(f"{offset:04X}: {hex_text:<47} |{ascii_text}|")
+            lines.extend((
+                "",
+                "RDT alan/kanal şeması bu projede çözülmedi. Dosya yalnızca incelendi; kanal tablosu ve telsiz değiştirilmedi.",
+                "Kanal listesi için Studio CSV biçimini kullanın.",
+            ))
+            QMessageBox.information(self, "Kod Fişi Dosya İncelemesi", "\n".join(lines))
+        except (OSError, ValueError) as exc:
+            QMessageBox.critical(self, "RDT İnceleme Hatası", str(exc))
 
     def refresh_ports(self):
+        previous_port = self.port_combo.currentData() or self.settings.value("serial/last_port", "")
         self.port_combo.clear()
-        ports = serial.tools.list_ports.comports()
+        try:
+            ports = serial.tools.list_ports.comports()
+        except Exception as exc:
+            self.port_combo.addItem("Port listesi alınamadı", "")
+            self.statusBar().showMessage(f"Seri portlar listelenemedi: {exc}", 8000)
+            return
         for p in ports:
             self.port_combo.addItem(f"{p.device} ({p.description})", p.device)
         if not ports:
             self.port_combo.addItem("Port bulunamadı", "")
+        if previous_port:
+            index = self.port_combo.findData(previous_port)
+            if index >= 0:
+                self.port_combo.setCurrentIndex(index)
 
     def test_device_handshake(self):
         port = self.port_combo.currentData()
@@ -1853,40 +2362,45 @@ class ATD878Studio(QMainWindow):
             QMessageBox.warning(self, "Port Seçimi", "Lütfen geçerli bir seri port seçin!")
             return
 
+        if self.handshake_thread and self.handshake_thread.isRunning():
+            self.statusBar().showMessage("Bağlantı testi zaten sürüyor.", 4000)
+            return
+        if self.flash_thread and self.flash_thread.isRunning():
+            QMessageBox.warning(self, "İşlem Sürüyor", "Ön kontrol bitmeden bağlantı testi başlatılamaz.")
+            return
+
         self.conn_indicator.setText("● TEST EDİLİYOR...")
         self.conn_indicator.setStyleSheet("color: #FBBF24; font-weight: 700; font-size: 11px;")
         self.statusBar().showMessage(f"AnyTone telsiz ile {port} üzerinden el sıkışılıyor...")
-        QApplication.processEvents()
+        self.settings.setValue("serial/last_port", port)
+        self.btn_connect.setEnabled(False)
+        self.btn_ping_flasher.setEnabled(False)
+        self.handshake_thread = HandshakeThread(port, 921600)
+        self.handshake_thread.result_signal.connect(self.on_handshake_finished)
+        self.handshake_thread.start()
 
-        flasher = AnyToneFlasher(port, 921600)
-        ok, msg = flasher.ping_device()
-        flasher.disconnect()
-
+    def on_handshake_finished(self, port, ok, message, model, hw_version):
+        self.btn_connect.setEnabled(True)
+        self.btn_ping_flasher.setEnabled(True)
         if ok:
-            self.conn_indicator.setText(f"● BAĞLANDI ({flasher.model_info})")
+            self.conn_indicator.setText(f"● BAĞLANDI ({model})")
             self.conn_indicator.setStyleSheet("color: #10B981; font-weight: 700; font-size: 11px;")
-            self.statusBar().showMessage(f"[✓] {msg}", 8000)
-            self.log(f"[✓] {msg}")
+            self.statusBar().showMessage(f"[✓] {message}", 8000)
+            self.log(f"[✓] {message}")
             QMessageBox.information(
                 self, "El Sıkışma Başarılı!",
-                f"AnyTone Telsiz Başarıyla Algılandı!\n\n"
-                f"Port: {port}\n"
-                f"{msg}\n\n"
-                f"Sistem hazır. Kod fişi ve firmware işlemleri yapabilirsiniz."
+                f"AnyTone D878 modeli doğrulandı.\n\nPort: {port}\nModel: {model}\nDonanım: {hw_version}\n\n"
+                "Bu bağlantı testi kod fişi veya firmware yazmaz."
             )
         else:
             self.conn_indicator.setText("● BAĞLANTI YOK")
             self.conn_indicator.setStyleSheet("color: #EF4444; font-weight: 700; font-size: 11px;")
-            self.statusBar().showMessage(f"[!] {msg}", 8000)
-            self.log(f"[!] {msg}")
+            self.statusBar().showMessage(f"[!] {message}", 8000)
+            self.log(f"[!] {message}")
             QMessageBox.critical(
                 self, "Bağlantı Başarısız",
-                f"Telsiz ile el sıkışılamadı!\n\n"
-                f"Hata Detayı: {msg}\n\n"
-                f"Olası Nedenler & Çözümler:\n"
-                f"1. Resmi AnyTone CPS veya başka bir terminal açıksa port meşgul olabilir, kapatın.\n"
-                f"2. Telsizin açık ve USB kablosunun tam oturduğundan emin olun.\n"
-                f"3. Aygıt Yöneticisi'nde USB Seri Cihaz (COM5) olarak göründüğünü doğrulayın."
+                f"Telsiz ile el sıkışılamadı.\n\nHata detayı: {message}\n\n"
+                "USB seri portunun doğru seçildiğini, telsizin açık olduğunu ve resmi CPS gibi başka bir uygulamanın portu kullanmadığını kontrol edin."
             )
 
     def select_fw_file(self):
@@ -1902,6 +2416,8 @@ class ATD878Studio(QMainWindow):
             self.fw_file_path = stock_path
             self.fw_file_label.setText(stock_path)
             self.log(f"[+] Orijinal V4.00 stok firmware seçildi: {stock_path}")
+        else:
+            QMessageBox.information(self, "Stok Firmware Bulunamadı", "Stok firmware paketi bu çalışma klasöründe bulunamadı. Firmware Seç ile dosyayı açabilirsiniz.")
 
     def select_icon_pkg(self):
         icon_path = os.path.join(self.release_dir, "D878UV_ICONV1.23", "D878_ICON_V1.23.CDD")
@@ -1910,6 +2426,8 @@ class ATD878Studio(QMainWindow):
             self.fw_file_label.setText(icon_path)
             self.rb_icon.setChecked(True)
             self.log(f"[+] Resmi İkon Paketi (3.7 MB) seçildi: {icon_path}")
+        else:
+            QMessageBox.information(self, "İkon Paketi Bulunamadı", "Resmi ikon paketi bu çalışma klasöründe bulunamadı.")
 
     def select_linkboard_pkg(self):
         link_path = os.path.join(self.release_dir, "APRS+BT FW V2.00", "V2.00(H)", "BHT_BOARD_H_V2.00_20230417.CDD")
@@ -1918,40 +2436,42 @@ class ATD878Studio(QMainWindow):
             self.fw_file_label.setText(link_path)
             self.rb_link.setChecked(True)
             self.log(f"[+] Resmi LinkBoard APRS+BT Firmware seçildi: {link_path}")
+        else:
+            QMessageBox.information(self, "LinkBoard Paketi Bulunamadı", "LinkBoard firmware paketi bu çalışma klasöründe bulunamadı.")
 
     def log(self, text):
         self.log_text.append(text)
 
     def start_flash(self):
+        if self.flash_thread and self.flash_thread.isRunning():
+            self.statusBar().showMessage("Paket ön kontrolü zaten sürüyor.", 4000)
+            return
+        if self.handshake_thread and self.handshake_thread.isRunning():
+            QMessageBox.warning(self, "İşlem Sürüyor", "Bağlantı testi bitmeden paket ön kontrolü başlatılamaz.")
+            return
         if not self.fw_file_path or not os.path.exists(self.fw_file_path):
             QMessageBox.critical(self, "Hata", "Lütfen geçerli bir firmware dosyası seçin!")
             return
 
         port = self.port_combo.currentData()
-        dry_run = self.chk_dry_run.isChecked()
-
-        if not dry_run and not port:
-            QMessageBox.critical(self, "Port Hatası", "Lütfen geçerli bir seri port seçin!")
-            return
-
-        if not dry_run:
-            ret = QMessageBox.question(
-                self, "Yükleme Onayı",
-                "DİKKAT: Cihaza gerçek veri yazma işlemi başlatılacak!\n"
-                "Cihazın ilgili Boot modunda açıldığından emin misiniz?",
-                QMessageBox.Yes | QMessageBox.No
-            )
-            if ret != QMessageBox.Yes:
-                return
+        target = "mcu"
+        if self.rb_icon.isChecked():
+            target = "icons"
+        elif self.rb_sct.isChecked():
+            target = "sct3258"
+        elif self.rb_link.isChecked():
+            target = "linkboard"
 
         self.btn_flash.setEnabled(False)
+        self.btn_connect.setEnabled(False)
+        self.btn_ping_flasher.setEnabled(False)
         self.progress_bar.setValue(0)
-        self.log(f"[*] İşlem başlatılıyor... (Mod: {'Simülasyon (Dry-Run)' if dry_run else 'GERÇEK YAZMA'})")
+        self.log(f"[*] Güvenli paket ön kontrolü başlatılıyor ({target}); cihaza yazma yapılmayacak.")
 
-        self.worker = FlasherThread(port, 921600, self.fw_file_path, dry_run=dry_run)
-        self.worker.progress_signal.connect(self.on_flash_progress)
-        self.worker.finished_signal.connect(self.on_flash_finished)
-        self.worker.start()
+        self.flash_thread = FlasherThread(port, 921600, self.fw_file_path, dry_run=True, target=target)
+        self.flash_thread.progress_signal.connect(self.on_flash_progress)
+        self.flash_thread.finished_signal.connect(self.on_flash_finished)
+        self.flash_thread.start()
 
     def on_flash_progress(self, pct, text):
         self.progress_bar.setValue(pct)
@@ -1959,6 +2479,8 @@ class ATD878Studio(QMainWindow):
 
     def on_flash_finished(self, success, msg):
         self.btn_flash.setEnabled(True)
+        self.btn_ping_flasher.setEnabled(True)
+        self.btn_connect.setEnabled(True)
         if success:
             self.log(f"[✓] {msg}")
             QMessageBox.information(self, "Başarılı", msg)

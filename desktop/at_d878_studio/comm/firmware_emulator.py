@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
 """
-AT-D878 Studio - ARM Cortex-M4 Firmware Analyzer & Emulator Engine
-Unicorn Engine tabanlı güvenli firmware analiz ve simülasyon modülü.
-AnyTone AT-D878UVII Plus GD32F303VGT6 hedefi için optimize edilmiştir.
+AT-D878 Studio - Raw image vector checks and partial ARM CPU sandbox.
+Memory-mapped radio peripherals and display behavior are not modeled.
 """
 
 import os
@@ -14,9 +13,9 @@ from unicorn import arm_const
 FLASH_BASE = 0x08000000
 FLASH_APP_BASE = 0x08004000
 FLASH_SIZE = 1024 * 1024  # 1 MB Flash
+FLASH_APP_SIZE = FLASH_SIZE - (FLASH_APP_BASE - FLASH_BASE)
 RAM_BASE = 0x20000000
 RAM_SIZE = 96 * 1024      # 96 KB SRAM
-BOOTLOADER_LIMIT = 0x08003FFF
 
 class FirmwareReport:
     def __init__(self):
@@ -24,16 +23,17 @@ class FirmwareReport:
         self.filesize = 0
         self.initial_sp = 0
         self.reset_handler = 0
-        self.is_valid_arm = False
-        self.is_safe = False
-        self.safety_msg = ""
-        self.detected_model = "Bilinmiyor"
-        self.detected_callsign = "TA5THK"
-        self.vfo_a_freq = "145.500.00"
-        self.vfo_b_freq = "433.500.00"
+        self.vectors_valid = False
+        self.vector_check_msg = ""
+        self.detected_model = "Bulunamadı"
+        self.detected_callsign = "Bulunamadı"
+        self.vfo_a_freq = "Bulunamadı"
+        self.vfo_b_freq = "Bulunamadı"
         self.vfo_a_mode = "FM"
         self.vfo_b_mode = "DMR"
-        self.cycles_executed = 0
+        self.instructions_executed = 0
+        self.emulation_status = "Çalıştırılmadı"
+        self.emulation_error = ""
         self.strings_found = []
         self.pc_trace = []
         self.registers = {}
@@ -46,16 +46,23 @@ class FirmwareEmulator:
         self.report = FirmwareReport()
         self.report.filepath = filepath
 
-        if not os.path.exists(filepath):
-            self.report.safety_msg = "Dosya bulunamadı."
+        if not os.path.isfile(filepath):
+            self.report.vector_check_msg = "Dosya bulunamadı."
             return self.report
 
-        with open(filepath, "rb") as f:
-            data = f.read()
+        try:
+            with open(filepath, "rb") as f:
+                data = f.read(FLASH_APP_SIZE + 1)
+        except OSError as exc:
+            self.report.vector_check_msg = f"Dosya okunamadı: {exc}"
+            return self.report
 
         self.report.filesize = len(data)
-        if len(data) < 32:
-            self.report.safety_msg = "Dosya boyutu Cortex-M4 vektör tablosu için çok küçük."
+        if len(data) < 8:
+            self.report.vector_check_msg = "Dosya vektör tablosunu okuyacak kadar büyük değil."
+            return self.report
+        if len(data) > FLASH_APP_SIZE:
+            self.report.vector_check_msg = f"İmaj uygulama alanını aşıyor ({len(data)} byte > {FLASH_APP_SIZE} byte)."
             return self.report
 
         # 1. Vektör Tablosu İncelemesi
@@ -64,25 +71,30 @@ class FirmwareEmulator:
         self.report.reset_handler = reset
 
         # GD32F303 SRAM: 0x20000000 - 0x20017FFF (96KB)
-        valid_sp = (0x20001000 <= sp <= 0x20018000)
-        # Flash App: 0x08004000 - 0x08100000
-        valid_reset = (FLASH_APP_BASE <= (reset & ~1) <= (FLASH_BASE + FLASH_SIZE))
+        valid_sp = (RAM_BASE <= sp <= RAM_BASE + RAM_SIZE) and (sp % 8 == 0)
+        reset_address = reset & ~1
+        # Firmware image must begin at the application base and use Thumb state.
+        valid_reset = (
+            bool(reset & 1)
+            and FLASH_APP_BASE <= reset_address < FLASH_APP_BASE + len(data)
+            and reset_address < FLASH_BASE + FLASH_SIZE
+        )
 
-        self.report.is_valid_arm = valid_sp and valid_reset
+        self.report.vectors_valid = valid_sp and valid_reset
 
-        # 2. Güvenlik Denetimi (Bootloader Koruması)
-        if (reset & ~1) <= BOOTLOADER_LIMIT:
-            self.report.is_safe = False
-            self.report.safety_msg = "KRİTİK HATA: Firmware fabrika bootloader bölgesine (0x08000000-0x08003FFF) müdahale ediyor!"
-        elif not valid_sp:
-            self.report.is_safe = False
-            self.report.safety_msg = f"HATA: Geçersiz Stack Pointer adresi: 0x{sp:08X}"
+        # These checks only assess a raw application image's vector table. They
+        # do not prove firmware safety, integrity, or hardware compatibility.
+        if not valid_sp:
+            self.report.vector_check_msg = f"Vektör kontrolü başarısız: SRAM sınırı / 8-byte hizası geçersiz (SP=0x{sp:08X})."
+        elif not (reset & 1):
+            self.report.vector_check_msg = f"Vektör kontrolü başarısız: Reset Handler Thumb adresi değil (0x{reset:08X})."
         elif not valid_reset:
-            self.report.is_safe = False
-            self.report.safety_msg = f"HATA: Geçersiz Reset Handler adresi: 0x{reset:08X}"
+            self.report.vector_check_msg = f"Vektör kontrolü başarısız: Reset Handler imajın uygulama aralığında değil (0x{reset:08X})."
         else:
-            self.report.is_safe = True
-            self.report.safety_msg = "🟢 %100 GÜVENLİ: Firmware 0x08004000 uygulama adresine bağlı, orijinal ROM bootloader tam korumalıdır."
+            self.report.vector_check_msg = (
+                "Vektör tablosu temel adres kontrollerini geçti. Bu, firmware'in güvenli, "
+                "sağlam veya cihazla uyumlu olduğunu kanıtlamaz."
+            )
 
         # 3. Gömülü Veri & Arayüz Metinlerini Tarama
         ascii_matches = re.findall(b"[A-Za-z0-9_\\-\\?\\!\\:\\%\\.\\[\\]]{4,32}", data)
@@ -90,7 +102,7 @@ class FirmwareEmulator:
         self.report.strings_found = str_list[:40]
 
         for s in str_list:
-            if "D878" in s:
+            if "D878" in s.upper():
                 self.report.detected_model = s
             if any(call in s for call in ["TA5THK", "TA1", "TA2", "TA3", "TA4", "TA5"]):
                 self.report.detected_callsign = s
@@ -100,7 +112,7 @@ class FirmwareEmulator:
                 self.report.vfo_b_freq = s
 
         # 4. Unicorn Engine ile ARM Cortex-M4 Donanım Emülasyonu
-        if self.report.is_safe:
+        if self.report.vectors_valid:
             try:
                 mu = unicorn.Uc(unicorn.UC_ARCH_ARM, unicorn.UC_MODE_THUMB)
 
@@ -121,20 +133,25 @@ class FirmwareEmulator:
                 mu.reg_write(arm_const.UC_ARM_REG_PC, reset)
 
                 step_trace = []
+                instruction_count = [0]
                 def trace_hook(uc, addr, size, user_data):
+                    instruction_count[0] += 1
                     if len(step_trace) < 25:
                         step_trace.append(f"0x{addr:08X} (Boyut: {size}B)")
 
                 mu.hook_add(unicorn.UC_HOOK_CODE, trace_hook)
 
-                # Belirtilen döngü kadar emüle et
+                # This is a partial CPU sandbox: memory-mapped peripherals are
+                # zero-filled and do not model the radio's actual hardware.
+                max_cycles = max(1, min(int(max_cycles), 1_000_000))
                 try:
                     mu.emu_start(reset, FLASH_APP_BASE + len(data), count=max_cycles)
-                except Exception:
-                    # Sonsuz döngü (while(1)) veya MMIO okuma istisnası doğaldır
-                    pass
+                    self.report.emulation_status = "Sınırda durdu"
+                except unicorn.UcError as exc:
+                    self.report.emulation_status = "Emülasyon hatası"
+                    self.report.emulation_error = str(exc)
 
-                self.report.cycles_executed = len(step_trace)
+                self.report.instructions_executed = instruction_count[0]
                 self.report.pc_trace = step_trace
                 self.report.registers = {
                     "R0": f"0x{mu.reg_read(arm_const.UC_ARM_REG_R0):08X}",
@@ -145,7 +162,8 @@ class FirmwareEmulator:
                     "LR": f"0x{mu.reg_read(arm_const.UC_ARM_REG_LR):08X}",
                     "PC": f"0x{mu.reg_read(arm_const.UC_ARM_REG_PC):08X}",
                 }
-            except Exception as emu_err:
-                self.report.safety_msg += f" (Emülatör notu: {str(emu_err)})"
+            except (unicorn.UcError, ValueError, TypeError) as emu_err:
+                self.report.emulation_status = "Başlatılamadı"
+                self.report.emulation_error = str(emu_err)
 
         return self.report

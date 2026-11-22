@@ -39,23 +39,36 @@ static int at1846s_read_internal(uint8_t reg, uint16_t *val)
 
 int at1846s_init(const at1846s_config_t *config)
 {
-    if (!config) {
-        return -1;
-    }
+    if (!config || !config->use_i2c) return -1;
 
     memcpy(&s_config, config, sizeof(at1846s_config_t));
     if (s_config.i2c_addr == 0) {
         s_config.i2c_addr = AT1846S_DEFAULT_I2C_ADDR;
     }
+    if (s_config.i2c_addr > 0x7F) return -1;
+
+    hal_i2c_config_t i2c_cfg = {
+        .speed = HAL_I2C_SPEED_FAST,
+        .use_dma = false,
+    };
+    if (hal_i2c_init(HAL_I2C_0, &i2c_cfg) != 0 ||
+        !hal_i2c_probe(HAL_I2C_0, s_config.i2c_addr)) {
+        s_initialized = false;
+        return -2;
+    }
 
     memset(&s_status, 0, sizeof(at1846s_status_t));
-    s_initialized = true;
+    s_initialized = false;
 
     /* Çip başlatma register sıralaması */
-    at1846s_write_internal(AT1846S_REG_CLK_MODE, 0x0000);  /* 24-28 MHz saat modu */
-    at1846s_write_internal(AT1846S_REG_LDO_VOLTAGE, 0x0380); /* 2.8V LDO */
-    at1846s_write_internal(AT1846S_REG_CH_MODE, AT1846S_BW_12_5KHZ);
+    if (at1846s_write_internal(AT1846S_REG_CLK_MODE, 0x0000) != 0 ||
+        at1846s_write_internal(AT1846S_REG_LDO_VOLTAGE, 0x0380) != 0 ||
+        at1846s_write_internal(AT1846S_REG_CH_MODE, AT1846S_BW_12_5KHZ) != 0) {
+        return -3;
+    }
 
+    s_status.bandwidth = AT1846S_BW_12_5KHZ;
+    s_initialized = true;
     return 0;
 }
 
@@ -70,7 +83,9 @@ void at1846s_deinit(void)
 
 int at1846s_set_frequency(uint32_t freq_hz)
 {
-    if (!s_initialized) return -1;
+    if (!s_initialized ||
+        !((freq_hz >= 134000000U && freq_hz <= 174000000U) ||
+          (freq_hz >= 400000000U && freq_hz <= 520000000U))) return -1;
 
     /* 
      * AT1846S frekans hesaplama:
@@ -84,14 +99,13 @@ int at1846s_set_frequency(uint32_t freq_hz)
     uint16_t lo = (uint16_t)(reg_val & 0xFFFF);
 
     /* Bant seçimi otomatik ayarla */
-    if (freq_hz >= 400000000 && freq_hz <= 520000000) {
-        at1846s_set_band(AT1846S_BAND_UHF_400MHZ);
-    } else if (freq_hz >= 134000000 && freq_hz <= 174000000) {
-        at1846s_set_band(AT1846S_BAND_VHF_134MHZ);
+    uint8_t band = (freq_hz >= 400000000U) ?
+                   AT1846S_BAND_UHF_400MHZ : AT1846S_BAND_VHF_134MHZ;
+    if (at1846s_set_band(band) != 0 ||
+        at1846s_write_internal(AT1846S_REG_FREQ_HI, hi) != 0 ||
+        at1846s_write_internal(AT1846S_REG_FREQ_LO, lo) != 0) {
+        return -2;
     }
-
-    at1846s_write_internal(AT1846S_REG_FREQ_HI, hi);
-    at1846s_write_internal(AT1846S_REG_FREQ_LO, lo);
 
     s_status.frequency_hz = freq_hz;
     return 0;
@@ -104,42 +118,59 @@ int64_t at1846s_get_frequency(void)
 
 int at1846s_set_band(uint8_t band)
 {
-    s_status.band = band;
-    return at1846s_write_internal(AT1846S_REG_BAND_SEL, (uint16_t)band);
+    if (!s_initialized || (band != AT1846S_BAND_UHF_400MHZ &&
+        band != AT1846S_BAND_VHF_200MHZ && band != AT1846S_BAND_VHF_134MHZ)) return -1;
+    int rc = at1846s_write_internal(AT1846S_REG_BAND_SEL, (uint16_t)band);
+    if (rc == 0) s_status.band = band;
+    return rc;
 }
 
 int at1846s_set_bandwidth(uint8_t bw)
 {
-    s_status.bandwidth = bw;
-    return at1846s_write_internal(AT1846S_REG_CH_MODE, (uint16_t)bw);
+    if (!s_initialized || (bw != AT1846S_BW_12_5KHZ && bw != AT1846S_BW_25KHZ)) return -1;
+    int rc = at1846s_write_internal(AT1846S_REG_CH_MODE, (uint16_t)bw);
+    if (rc == 0) s_status.bandwidth = bw;
+    return rc;
 }
 
 int at1846s_tx_on(void)
 {
-    s_status.tx_active = true;
-    s_status.rx_active = false;
+    if (!s_initialized) return -1;
     /* TXON bitini aktif et */
-    return at1846s_write_internal(0x3C, 0x0020);
+    int rc = at1846s_write_internal(0x3C, 0x0020);
+    if (rc == 0) {
+        s_status.tx_active = true;
+        s_status.rx_active = false;
+    }
+    return rc;
 }
 
 int at1846s_tx_off(void)
 {
-    s_status.tx_active = false;
-    return at1846s_write_internal(0x3C, 0x0000);
+    if (!s_initialized) return -1;
+    int rc = at1846s_write_internal(0x3C, 0x0000);
+    if (rc == 0) s_status.tx_active = false;
+    return rc;
 }
 
 int at1846s_rx_on(void)
 {
-    s_status.rx_active = true;
-    s_status.tx_active = false;
+    if (!s_initialized) return -1;
     /* RXON bitini aktif et */
-    return at1846s_write_internal(0x3C, 0x0010);
+    int rc = at1846s_write_internal(0x3C, 0x0010);
+    if (rc == 0) {
+        s_status.rx_active = true;
+        s_status.tx_active = false;
+    }
+    return rc;
 }
 
 int at1846s_rx_off(void)
 {
-    s_status.rx_active = false;
-    return at1846s_write_internal(0x3C, 0x0000);
+    if (!s_initialized) return -1;
+    int rc = at1846s_write_internal(0x3C, 0x0000);
+    if (rc == 0) s_status.rx_active = false;
+    return rc;
 }
 
 int16_t at1846s_get_rssi(void)
@@ -154,7 +185,7 @@ int16_t at1846s_get_rssi(void)
 
 int at1846s_set_squelch(uint8_t level)
 {
-    if (level > 8) level = 8;
+    if (!s_initialized || level > 8) return -1;
     /* Squelch eşik register ayarı */
     uint16_t th = (uint16_t)level * 12;
     return at1846s_write_internal(0x48, th);

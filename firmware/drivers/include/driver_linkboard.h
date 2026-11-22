@@ -126,6 +126,13 @@ int linkboard_gps_power(bool on);
 int linkboard_aprs_configure(const aprs_config_t *config);
 
 /**
+ * @brief APRS yapılandırmasını oku
+ * @param config Yapılandırma çıktısı
+ * @return 0 başarılı, negatif hata
+ */
+int linkboard_aprs_get_config(aprs_config_t *config);
+
+/**
  * @brief APRS konum beacon'ı gönder
  *        GPS verisi otomatik eklenir
  * @return 0 başarılı

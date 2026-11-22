@@ -40,11 +40,16 @@ void cps_protocol_process(void)
     size_t avail = hal_uart_available(HAL_UART_0);
     if (avail == 0) return;
 
-    /* Handshake kontrolü: "PROGRAM" el sıkışması */
-    if (avail >= 7) {
-        uint8_t peek[8];
-        int n = hal_uart_receive(HAL_UART_0, peek, 7, 5);
+    /* Handshake kontrolü: "PROGRAM" el sıkışması parçalı UART alımında korunur. */
+    uint8_t first_byte;
+    if (avail > 0 && hal_uart_peek(HAL_UART_0, &first_byte, 1) == 1 &&
+        first_byte == 'P') {
+        if (avail < 7) return;
+
+        uint8_t peek[7];
+        int n = hal_uart_peek(HAL_UART_0, peek, sizeof(peek));
         if (n == 7 && memcmp(peek, "PROGRAM", 7) == 0) {
+            hal_uart_receive(HAL_UART_0, peek, sizeof(peek), 0);
             static const uint8_t resp_qx[] = {'Q', 'X', CPS_CMD_ACK};
             hal_uart_transmit(HAL_UART_0, resp_qx, sizeof(resp_qx));
             s_connected = true;
@@ -113,10 +118,15 @@ void cps_protocol_process(void)
             uint32_t addr = ((uint32_t)req[0] << 24) | ((uint32_t)req[1] << 16) |
                             ((uint32_t)req[2] << 8)  | (uint32_t)req[3];
             uint16_t len  = ((uint16_t)req[4] << 8)  | (uint16_t)req[5];
-
-            if (len > sizeof(s_rx_buffer)) len = sizeof(s_rx_buffer);
-
-            spi_flash_read(addr, s_rx_buffer, len);
+            spi_flash_info_t info;
+            if (len == 0 || len > sizeof(s_rx_buffer) ||
+                spi_flash_get_info(&info) != 0 || addr >= info.total_size ||
+                len > info.total_size - addr ||
+                spi_flash_read(addr, s_rx_buffer, len) != (int)len) {
+                uint8_t nack = CPS_CMD_NACK;
+                hal_uart_transmit(HAL_UART_0, &nack, 1);
+                break;
+            }
 
             /* Checksum hesapla ve ilet */
             uint8_t checksum = 0;
@@ -138,17 +148,31 @@ void cps_protocol_process(void)
                             ((uint32_t)header[2] << 8)  | (uint32_t)header[3];
             uint16_t len  = ((uint16_t)header[4] << 8)  | (uint16_t)header[5];
 
-            if (len <= sizeof(s_rx_buffer)) {
-                if (hal_uart_receive(HAL_UART_0, s_rx_buffer, len, 500) == (int)len) {
-                    uint8_t expected_cs = 0;
-                    hal_uart_receive(HAL_UART_0, &expected_cs, 1, 50);
-
-                    /* Yaz ve ACK döndür */
-                    spi_flash_write(addr, s_rx_buffer, len);
-                    uint8_t ack = CPS_CMD_ACK;
-                    hal_uart_transmit(HAL_UART_0, &ack, 1);
-                }
+            if (len == 0 || len > sizeof(s_rx_buffer)) {
+                uint8_t nack = CPS_CMD_NACK;
+                hal_uart_transmit(HAL_UART_0, &nack, 1);
+                break;
             }
+
+            if (hal_uart_receive(HAL_UART_0, s_rx_buffer, len, 500) != (int)len) {
+                uint8_t nack = CPS_CMD_NACK;
+                hal_uart_transmit(HAL_UART_0, &nack, 1);
+                break;
+            }
+
+            uint8_t expected_cs = 0;
+            uint8_t actual_cs = 0;
+            int checksum_rc = hal_uart_receive(HAL_UART_0, &expected_cs, 1, 50);
+            for (uint16_t i = 0; i < len; i++) actual_cs += s_rx_buffer[i];
+
+            spi_flash_info_t info;
+            bool range_ok = spi_flash_get_info(&info) == 0 &&
+                            addr < info.total_size &&
+                            len <= info.total_size - addr;
+            bool write_ok = checksum_rc == 1 && expected_cs == actual_cs && range_ok &&
+                            spi_flash_write(addr, s_rx_buffer, len) == (int)len;
+            uint8_t response = write_ok ? CPS_CMD_ACK : CPS_CMD_NACK;
+            hal_uart_transmit(HAL_UART_0, &response, 1);
         }
         break;
     }

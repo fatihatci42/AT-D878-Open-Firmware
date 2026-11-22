@@ -26,6 +26,7 @@
 #include "hal_systick.h"
 #include "hal_uart.h"
 #include "driver_display.h"
+#include "driver_audio.h"
 #include "driver_at1846s.h"
 #include "driver_keyboard.h"
 #include "driver_sct3258.h"
@@ -146,6 +147,12 @@ int main(void)
     }
 
     /* ============================================
+     * 4b. Ses codec'i (TLV320AIC3204, I2C)
+     * ============================================ */
+    rc = audio_codec_init(AUDIO_SAMPLE_RATE_16KHZ);
+    s_boot.audio = (rc == 0);
+
+    /* ============================================
      * 5. RF Transceiver (AT1846S)
      * ============================================ */
     hal_delay_ms(50);  /* Güç stabilizasyonu bekle */
@@ -219,8 +226,8 @@ int main(void)
      * 9. Radyo Çekirdeği & CPS İletişimi
      * ============================================ */
     cps_protocol_init();
-    radio_core_init();
-    s_boot.radio_core = true;
+    rc = radio_core_init();
+    s_boot.radio_core = (rc == 0);
 
     /* ============================================
      * 10. Kullanıcı Arayüzü
@@ -228,8 +235,8 @@ int main(void)
     ui_init(UI_LANG_TURKISH, UI_THEME_DARK);
     s_boot.ui = true;
 
-    /* Ses amplifikatörünü aç (boot tamamlandı) */
-    hal_gpio_set(PIN_AUDIO_MUTE);
+    /* Ses codec'i başarıyla başlatıldıysa amplifikatörü aç. */
+    if (s_boot.audio) hal_gpio_set(PIN_AUDIO_MUTE);
 
     /* Boot tamamlandı — LED söndür */
     hal_delay_ms(500);
@@ -239,6 +246,8 @@ int main(void)
     if (!s_boot.dmr)       error_blink(3);
     if (!s_boot.ext_flash) error_blink(4);
     if (!s_boot.linkboard) error_blink(5);
+    if (!s_boot.radio_core) error_blink(6);
+    if (!s_boot.audio)     error_blink(7);
 
     hal_gpio_clear(PIN_LED_PWR);  /* LED kapat */
 

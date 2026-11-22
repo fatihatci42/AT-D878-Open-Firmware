@@ -12,6 +12,7 @@
 #include "driver_linkboard.h"
 #include "hal_uart.h"
 #include "hal_systick.h"
+#include <ctype.h>
 #include <string.h>
 #include <stdlib.h>
 #include <stdio.h>
@@ -31,6 +32,7 @@
 
 /** NMEA cümle tamponu */
 #define NMEA_BUF_SIZE         128
+#define GPS_FIX_MAX_AGE_MS    5000U
 
 /* ============================================================
  * Statik Değişkenler
@@ -40,6 +42,7 @@ static gps_data_t   s_gps_data;
 static aprs_config_t s_aprs_config;
 static bt_status_t  s_bt_status;
 static bool         s_initialized = false;
+static tick_t       s_gps_last_fix_ms;
 
 /* NMEA parse tamponu */
 static char s_nmea_buf[NMEA_BUF_SIZE];
@@ -53,8 +56,12 @@ static uint8_t s_nmea_pos = 0;
 static int lb_send_command(const char *cmd, char *response, size_t resp_size)
 {
     /* Komutu gönder */
-    hal_uart_transmit(LB_UART_PORT, (const uint8_t *)cmd, strlen(cmd));
-    hal_uart_transmit(LB_UART_PORT, (const uint8_t *)"\r\n", 2);
+    if (!cmd) return -1;
+    size_t cmd_len = strlen(cmd);
+    if (hal_uart_transmit(LB_UART_PORT, (const uint8_t *)cmd, cmd_len) != (int)cmd_len ||
+        hal_uart_transmit(LB_UART_PORT, (const uint8_t *)"\r\n", 2) != 2) {
+        return -1;
+    }
 
     /* Yanıt bekle */
     if (response && resp_size > 0) {
@@ -80,17 +87,34 @@ static int lb_send_command(const char *cmd, char *response, size_t resp_size)
  * @brief NMEA dereceyi ondalık dereceye dönüştür
  * "4056.7890" → 40 + 56.7890/60 = 40.9464833...
  */
-static double nmea_to_decimal(const char *field, char dir)
+static bool nmea_to_decimal(const char *field, char dir,
+                            uint8_t degree_digits, double *decimal)
 {
-    if (!field || field[0] == '\0') return 0.0;
+    if (!field || !decimal || field[0] == '\0') return false;
 
-    double raw = atof(field);
+    char *end = NULL;
+    double raw = strtod(field, &end);
+    uint8_t max_degrees = (degree_digits == 2) ? 90 : 180;
+    if (end == field || *end != '\0' || !(raw >= 0.0) ||
+        raw > (double)max_degrees * 100.0 + 59.999999) {
+        return false;
+    }
+
     int degrees = (int)(raw / 100.0);
     double minutes = raw - (degrees * 100.0);
-    double decimal = degrees + (minutes / 60.0);
+    if (minutes >= 60.0 ||
+        (degrees == max_degrees && minutes > 0.0)) {
+        return false;
+    }
 
-    if (dir == 'S' || dir == 'W') decimal = -decimal;
-    return decimal;
+    if (dir == 'S' || dir == 'W') {
+        *decimal = -(degrees + (minutes / 60.0));
+    } else if (dir == 'N' || dir == 'E') {
+        *decimal = degrees + (minutes / 60.0);
+    } else {
+        return false;
+    }
+    return true;
 }
 
 /** NMEA checksum doğrula */
@@ -106,6 +130,10 @@ static bool nmea_verify_checksum(const char *sentence)
     }
 
     if (sentence[i] != '*') return false;
+    if (!isxdigit((unsigned char)sentence[i + 1]) ||
+        !isxdigit((unsigned char)sentence[i + 2]) || sentence[i + 3] != '\0') {
+        return false;
+    }
 
     uint8_t given = (uint8_t)strtol(&sentence[i + 1], NULL, 16);
     return (calc == given);
@@ -149,27 +177,50 @@ static void parse_gprmc(const char *sentence)
 
     /* Alan 1: Zaman (hhmmss.ss) */
     nmea_field_copy(sentence, 1, field, sizeof(field));
-    if (field[0]) {
-        s_gps_data.hour   = (uint8_t)((field[0] - '0') * 10 + (field[1] - '0'));
-        s_gps_data.minute = (uint8_t)((field[2] - '0') * 10 + (field[3] - '0'));
-        s_gps_data.second = (uint8_t)((field[4] - '0') * 10 + (field[5] - '0'));
+    if (strlen(field) < 6 ||
+        !isdigit((unsigned char)field[0]) || !isdigit((unsigned char)field[1]) ||
+        !isdigit((unsigned char)field[2]) || !isdigit((unsigned char)field[3]) ||
+        !isdigit((unsigned char)field[4]) || !isdigit((unsigned char)field[5])) {
+        s_gps_data.valid = false;
+        s_gps_last_fix_ms = 0;
+        return;
+    }
+    s_gps_data.hour   = (uint8_t)((field[0] - '0') * 10 + (field[1] - '0'));
+    s_gps_data.minute = (uint8_t)((field[2] - '0') * 10 + (field[3] - '0'));
+    s_gps_data.second = (uint8_t)((field[4] - '0') * 10 + (field[5] - '0'));
+    if (s_gps_data.hour > 23 || s_gps_data.minute > 59 ||
+        s_gps_data.second > 60) {
+        s_gps_data.valid = false;
+        s_gps_last_fix_ms = 0;
+        return;
     }
 
     /* Alan 2: Durum (A=aktif, V=void) */
     nmea_field_copy(sentence, 2, field, sizeof(field));
     s_gps_data.valid = (field[0] == 'A');
+    if (!s_gps_data.valid) {
+        s_gps_last_fix_ms = 0;
+        return;
+    }
 
     /* Alan 3,4: Enlem */
     char lat_field[16], lat_dir[4];
     nmea_field_copy(sentence, 3, lat_field, sizeof(lat_field));
     nmea_field_copy(sentence, 4, lat_dir, sizeof(lat_dir));
-    s_gps_data.latitude = nmea_to_decimal(lat_field, lat_dir[0]);
 
     /* Alan 5,6: Boylam */
     char lon_field[16], lon_dir[4];
     nmea_field_copy(sentence, 5, lon_field, sizeof(lon_field));
     nmea_field_copy(sentence, 6, lon_dir, sizeof(lon_dir));
-    s_gps_data.longitude = nmea_to_decimal(lon_field, lon_dir[0]);
+    double latitude, longitude;
+    if (!nmea_to_decimal(lat_field, lat_dir[0], 2, &latitude) ||
+        !nmea_to_decimal(lon_field, lon_dir[0], 3, &longitude)) {
+        s_gps_data.valid = false;
+        s_gps_last_fix_ms = 0;
+        return;
+    }
+    s_gps_data.latitude = latitude;
+    s_gps_data.longitude = longitude;
 
     /* Alan 7: Hız (knot) */
     nmea_field_copy(sentence, 7, field, sizeof(field));
@@ -181,11 +232,16 @@ static void parse_gprmc(const char *sentence)
 
     /* Alan 9: Tarih (ddmmyy) */
     nmea_field_copy(sentence, 9, field, sizeof(field));
-    if (field[0] && strlen(field) >= 6) {
+    if (strlen(field) >= 6 &&
+        isdigit((unsigned char)field[0]) && isdigit((unsigned char)field[1]) &&
+        isdigit((unsigned char)field[2]) && isdigit((unsigned char)field[3]) &&
+        isdigit((unsigned char)field[4]) && isdigit((unsigned char)field[5])) {
         s_gps_data.day   = (uint8_t)((field[0] - '0') * 10 + (field[1] - '0'));
         s_gps_data.month = (uint8_t)((field[2] - '0') * 10 + (field[3] - '0'));
         s_gps_data.year  = (uint16_t)(2000 + (field[4] - '0') * 10 + (field[5] - '0'));
     }
+
+    s_gps_last_fix_ms = hal_tick_get();
 }
 
 /**
@@ -228,6 +284,7 @@ int linkboard_init(void)
     memset(&s_aprs_config, 0, sizeof(s_aprs_config));
     memset(&s_bt_status, 0, sizeof(s_bt_status));
     s_nmea_pos = 0;
+    s_gps_last_fix_ms = 0;
 
     /* UART başlat */
     hal_uart_config_t uart_cfg = {
@@ -270,7 +327,12 @@ int linkboard_gps_get(gps_data_t *data)
 {
     if (!data) return -1;
     memcpy(data, &s_gps_data, sizeof(gps_data_t));
-    return s_gps_data.valid ? 0 : -1;
+    if (!data->valid ||
+        hal_tick_elapsed(s_gps_last_fix_ms, hal_tick_get()) > GPS_FIX_MAX_AGE_MS) {
+        data->valid = false;
+        return -1;
+    }
+    return 0;
 }
 
 int linkboard_gps_power(bool on)
@@ -282,30 +344,44 @@ int linkboard_aprs_configure(const aprs_config_t *config)
 {
     if (!s_initialized || !config) return -1;
     memcpy(&s_aprs_config, config, sizeof(aprs_config_t));
+    s_aprs_config.callsign[sizeof(s_aprs_config.callsign) - 1] = '\0';
+    s_aprs_config.dest[sizeof(s_aprs_config.dest) - 1] = '\0';
+    s_aprs_config.path[sizeof(s_aprs_config.path) - 1] = '\0';
+    s_aprs_config.comment[sizeof(s_aprs_config.comment) - 1] = '\0';
+    if (s_aprs_config.callsign[0] == '\0' || s_aprs_config.ssid > 15) return -1;
 
     char cmd[128];
     snprintf(cmd, sizeof(cmd), "AT+APRS_CALL=%s-%d",
-             config->callsign, config->ssid);
-    lb_send_command(cmd, NULL, 0);
+             s_aprs_config.callsign, s_aprs_config.ssid);
+    if (lb_send_command(cmd, NULL, 0) != 0) return -1;
 
-    snprintf(cmd, sizeof(cmd), "AT+APRS_PATH=%s", config->path);
-    lb_send_command(cmd, NULL, 0);
+    snprintf(cmd, sizeof(cmd), "AT+APRS_PATH=%s", s_aprs_config.path);
+    if (lb_send_command(cmd, NULL, 0) != 0) return -1;
 
     snprintf(cmd, sizeof(cmd), "AT+APRS_SYMBOL=%c%c",
-             config->symbol_table, config->symbol_code);
-    lb_send_command(cmd, NULL, 0);
+             s_aprs_config.symbol_table, s_aprs_config.symbol_code);
+    if (lb_send_command(cmd, NULL, 0) != 0) return -1;
 
+    return 0;
+}
+
+int linkboard_aprs_get_config(aprs_config_t *config)
+{
+    if (!s_initialized || !config) return -1;
+    memcpy(config, &s_aprs_config, sizeof(aprs_config_t));
     return 0;
 }
 
 int linkboard_aprs_send_position(void)
 {
-    if (!s_initialized || !s_gps_data.valid) return -1;
+    gps_data_t gps;
+    if (!s_initialized || linkboard_gps_get(&gps) != 0 || !gps.valid) return -1;
 
     char cmd[160];
-    snprintf(cmd, sizeof(cmd), "AT+APRS_POS=%.4f,%.4f,%.0f,%s",
-             s_gps_data.latitude, s_gps_data.longitude,
-             s_gps_data.altitude_m, s_aprs_config.comment);
+    int cmd_len = snprintf(cmd, sizeof(cmd), "AT+APRS_POS=%.4f,%.4f,%.0f,%s",
+                           gps.latitude, gps.longitude,
+                           (double)gps.altitude_m, s_aprs_config.comment);
+    if (cmd_len < 0 || (size_t)cmd_len >= sizeof(cmd)) return -1;
     return lb_send_command(cmd, NULL, 0);
 }
 

@@ -249,6 +249,19 @@ int hal_uart_receive(hal_uart_port_t port, uint8_t *data,
     return (int)received;
 }
 
+int hal_uart_peek(hal_uart_port_t port, uint8_t *data, size_t len)
+{
+    if (port >= HAL_UART_COUNT || !data || !s_initialized[port]) return -1;
+    if (len > ring_available(&s_rx_ring[port])) return 0;
+
+    uint16_t index = s_rx_ring[port].tail;
+    for (size_t i = 0; i < len; i++) {
+        data[i] = s_rx_ring[port].buf[index];
+        index = (index + 1U) % RX_RING_SIZE;
+    }
+    return (int)len;
+}
+
 int hal_uart_set_rx_callback(hal_uart_port_t port,
                              hal_uart_rx_callback_t callback,
                              void *context)

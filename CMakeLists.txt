@@ -93,14 +93,14 @@ set(FIRMWARE_INCLUDES
 )
 
 # Kaynak dosyaları topla
-file(GLOB_RECURSE CORE_SOURCES    firmware/core/src/*.c)
-file(GLOB_RECURSE HAL_SOURCES     firmware/hal/src/*.c)
-file(GLOB_RECURSE DRIVER_SOURCES  firmware/drivers/src/*.c)
-file(GLOB_RECURSE RADIO_SOURCES   firmware/radio/src/*.c)
-file(GLOB_RECURSE AUDIO_SOURCES   firmware/audio/src/*.c)
-file(GLOB_RECURSE UI_SOURCES      firmware/ui/src/*.c)
-file(GLOB_RECURSE STORAGE_SOURCES firmware/storage/src/*.c)
-file(GLOB_RECURSE CONFIG_SOURCES  firmware/config/src/*.c)
+file(GLOB_RECURSE CORE_SOURCES    CONFIGURE_DEPENDS firmware/core/src/*.c)
+file(GLOB_RECURSE HAL_SOURCES     CONFIGURE_DEPENDS firmware/hal/src/*.c)
+file(GLOB_RECURSE DRIVER_SOURCES  CONFIGURE_DEPENDS firmware/drivers/src/*.c)
+file(GLOB_RECURSE RADIO_SOURCES   CONFIGURE_DEPENDS firmware/radio/src/*.c)
+file(GLOB_RECURSE AUDIO_SOURCES   CONFIGURE_DEPENDS firmware/audio/src/*.c)
+file(GLOB_RECURSE UI_SOURCES      CONFIGURE_DEPENDS firmware/ui/src/*.c)
+file(GLOB_RECURSE STORAGE_SOURCES CONFIGURE_DEPENDS firmware/storage/src/*.c)
+file(GLOB_RECURSE CONFIG_SOURCES  CONFIGURE_DEPENDS firmware/config/src/*.c)
 
 set(FIRMWARE_SOURCES
     ${CORE_SOURCES}
@@ -115,46 +115,77 @@ set(FIRMWARE_SOURCES
 
 # Koşullu modüller
 if(ENABLE_GPS)
-    file(GLOB_RECURSE GPS_SOURCES firmware/gps/src/*.c)
+    file(GLOB_RECURSE GPS_SOURCES CONFIGURE_DEPENDS firmware/gps/src/*.c)
     list(APPEND FIRMWARE_SOURCES ${GPS_SOURCES})
 endif()
 
 if(ENABLE_DMR OR ENABLE_M17)
-    file(GLOB_RECURSE DIGITAL_SOURCES firmware/digital/src/*.c)
+    file(GLOB_RECURSE DIGITAL_SOURCES CONFIGURE_DEPENDS firmware/digital/src/*.c)
     list(APPEND FIRMWARE_SOURCES ${DIGITAL_SOURCES})
 endif()
 
 if(ENABLE_APRS)
-    file(GLOB_RECURSE APRS_SOURCES firmware/aprs/src/*.c)
+    file(GLOB_RECURSE APRS_SOURCES CONFIGURE_DEPENDS firmware/aprs/src/*.c)
     list(APPEND FIRMWARE_SOURCES ${APRS_SOURCES})
 endif()
 
 # Linker script
 set(LINKER_SCRIPT ${CMAKE_CURRENT_SOURCE_DIR}/firmware/core/gd32f303vgt6.ld)
 
-# Linker bayrakları
-set(CMAKE_EXE_LINKER_FLAGS
-    "-mcpu=${MCU_CORE} -mthumb -mfpu=${MCU_FPU} -mfloat-abi=${MCU_FLOAT_ABI} \
-     -T${LINKER_SCRIPT} \
-     -Wl,--gc-sections \
-     -Wl,--print-memory-usage \
-     -Wl,-Map=${FIRMWARE_TARGET}.map \
-     --specs=nano.specs \
-     --specs=nosys.specs \
-     -lm -lc -lnosys"
+# Firmware hedefi
+if(NOT FIRMWARE_SOURCES)
+    message(FATAL_ERROR "Firmware source list is empty")
+endif()
+
+add_executable(${FIRMWARE_TARGET} ${FIRMWARE_SOURCES})
+target_include_directories(${FIRMWARE_TARGET} PRIVATE ${FIRMWARE_INCLUDES})
+target_compile_options(${FIRMWARE_TARGET} PRIVATE ${COMMON_C_FLAGS})
+target_compile_options(${FIRMWARE_TARGET} PRIVATE
+    "$<$<CONFIG:Debug>:-Og>"
+    "$<$<CONFIG:Debug>:-g3>"
+    "$<$<CONFIG:Debug>:-gdwarf-2>"
+    "$<$<CONFIG:Debug>:-DDEBUG>"
+    "$<$<CONFIG:Release>:-O2>"
+    "$<$<CONFIG:Release>:-DNDEBUG>"
 )
 
-# Firmware hedefi (henüz kaynak dosyaları oluşturulmadı - placeholder)
-# add_executable(${FIRMWARE_TARGET} ${FIRMWARE_SOURCES})
-# target_include_directories(${FIRMWARE_TARGET} PRIVATE ${FIRMWARE_INCLUDES})
+target_link_options(${FIRMWARE_TARGET} PRIVATE
+    "-mcpu=${MCU_CORE}"
+    "-mthumb"
+    "-mfpu=${MCU_FPU}"
+    "-mfloat-abi=${MCU_FLOAT_ABI}"
+    "-T${LINKER_SCRIPT}"
+    "-Wl,--gc-sections"
+    "-Wl,--print-memory-usage"
+    "-Wl,-Map=${FIRMWARE_TARGET}.map"
+    "--specs=nano.specs"
+    "--specs=nosys.specs"
+    "-nostartfiles"
+)
+target_link_libraries(${FIRMWARE_TARGET} PRIVATE m c nosys)
 
-# Post-build: bin ve hex dosyaları oluştur
-# add_custom_command(TARGET ${FIRMWARE_TARGET} POST_BUILD
-#     COMMAND ${CMAKE_OBJCOPY} -O binary $<TARGET_FILE:${FIRMWARE_TARGET}> ${FIRMWARE_TARGET}.bin
-#     COMMAND ${CMAKE_OBJCOPY} -O ihex $<TARGET_FILE:${FIRMWARE_TARGET}> ${FIRMWARE_TARGET}.hex
-#     COMMAND ${CMAKE_SIZE} $<TARGET_FILE:${FIRMWARE_TARGET}>
-#     COMMENT "Firmware binary dosyaları oluşturuluyor..."
-# )
+if(NOT CMAKE_OBJCOPY)
+    find_program(CMAKE_OBJCOPY NAMES arm-none-eabi-objcopy REQUIRED)
+endif()
+if(NOT CMAKE_SIZE)
+    find_program(CMAKE_SIZE NAMES arm-none-eabi-size REQUIRED)
+endif()
+find_package(Python3 COMPONENTS Interpreter REQUIRED)
+
+set(FIRMWARE_BIN ${CMAKE_CURRENT_BINARY_DIR}/${FIRMWARE_TARGET}.bin)
+set(FIRMWARE_HEX ${CMAKE_CURRENT_BINARY_DIR}/${FIRMWARE_TARGET}.hex)
+set(FIRMWARE_PACKAGE_DIR ${CMAKE_CURRENT_BINARY_DIR}/package)
+
+add_custom_command(TARGET ${FIRMWARE_TARGET} POST_BUILD
+    COMMAND ${CMAKE_OBJCOPY} -O binary $<TARGET_FILE:${FIRMWARE_TARGET}> ${FIRMWARE_BIN}
+    COMMAND ${CMAKE_OBJCOPY} -O ihex $<TARGET_FILE:${FIRMWARE_TARGET}> ${FIRMWARE_HEX}
+    COMMAND ${CMAKE_SIZE} $<TARGET_FILE:${FIRMWARE_TARGET}>
+    COMMAND ${Python3_EXECUTABLE}
+            ${CMAKE_CURRENT_SOURCE_DIR}/tools/firmware_analyzer/make_firmware_pkg.py
+            ${FIRMWARE_BIN} -o ${FIRMWARE_PACKAGE_DIR}
+    COMMENT "Generating firmware binaries and update package"
+    VERBATIM
+)
 
 message(STATUS "")
 message(STATUS "=== AT-D878 Open Firmware Build Configuration ===")

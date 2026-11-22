@@ -96,6 +96,12 @@ int hal_uart_receive(hal_uart_port_t port, uint8_t *data,
                      size_t len, uint32_t timeout_ms);
 
 /**
+ * @brief UART RX buffer içeriğini tüketmeden oku
+ * @return Kopyalanan byte sayısı, negatif hata
+ */
+int hal_uart_peek(hal_uart_port_t port, uint8_t *data, size_t len);
+
+/**
  * @brief UART alma callback ayarla (kesme ile)
  */
 int hal_uart_set_rx_callback(hal_uart_port_t port,

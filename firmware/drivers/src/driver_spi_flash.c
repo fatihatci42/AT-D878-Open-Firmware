@@ -37,6 +37,12 @@
 static spi_flash_info_t s_flash_info;
 static bool s_initialized = false;
 
+static bool flash_range_valid(uint32_t addr, size_t len)
+{
+    return s_initialized && len > 0 && addr < s_flash_info.total_size &&
+           len <= (size_t)(s_flash_info.total_size - addr);
+}
+
 /* ============================================================
  * Düşük Seviye SPI İşlemleri
  * ============================================================ */
@@ -221,7 +227,7 @@ int spi_flash_get_info(spi_flash_info_t *info)
 
 int spi_flash_read(uint32_t addr, uint8_t *data, size_t len)
 {
-    if (!s_initialized || !data || len == 0) return -1;
+    if (!data || !flash_range_valid(addr, len)) return -1;
 
     FLASH_CS_LOW();
     flash_send_cmd(SPIFLASH_CMD_FAST_READ);
@@ -238,7 +244,7 @@ int spi_flash_read(uint32_t addr, uint8_t *data, size_t len)
 
 int spi_flash_write(uint32_t addr, const uint8_t *data, size_t len)
 {
-    if (!s_initialized || !data || len == 0) return -1;
+    if (!data || !flash_range_valid(addr, len) || s_flash_info.page_size == 0) return -1;
 
     size_t written = 0;
 
@@ -271,13 +277,15 @@ int spi_flash_write(uint32_t addr, const uint8_t *data, size_t len)
 
 int spi_flash_erase_sector(uint32_t addr)
 {
-    if (!s_initialized) return -1;
+    if (!s_initialized || s_flash_info.sector_size == 0) return -1;
+    uint32_t sector_start = addr & ~(s_flash_info.sector_size - 1U);
+    if (!flash_range_valid(sector_start, s_flash_info.sector_size)) return -1;
 
     flash_write_enable();
 
     FLASH_CS_LOW();
     flash_send_cmd(SPIFLASH_CMD_SECTOR_ERASE);
-    flash_send_addr(addr & ~(s_flash_info.sector_size - 1));
+    flash_send_addr(sector_start);
     FLASH_CS_HIGH();
 
     return spi_flash_wait_ready(500);
@@ -285,13 +293,15 @@ int spi_flash_erase_sector(uint32_t addr)
 
 int spi_flash_erase_block(uint32_t addr)
 {
-    if (!s_initialized) return -1;
+    if (!s_initialized || s_flash_info.block_size == 0) return -1;
+    uint32_t block_start = addr & ~(s_flash_info.block_size - 1U);
+    if (!flash_range_valid(block_start, s_flash_info.block_size)) return -1;
 
     flash_write_enable();
 
     FLASH_CS_LOW();
     flash_send_cmd(SPIFLASH_CMD_BLOCK_ERASE_64K);
-    flash_send_addr(addr & ~(s_flash_info.block_size - 1));
+    flash_send_addr(block_start);
     FLASH_CS_HIGH();
 
     return spi_flash_wait_ready(2000);
