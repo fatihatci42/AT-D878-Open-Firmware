@@ -1,0 +1,26 @@
+# ARM GCC Toolchain dosyası - AT-D878 Open Firmware
+# GD32F303VGT6 (ARM Cortex-M4) için cross-compilation
+
+set(CMAKE_SYSTEM_NAME Generic)
+set(CMAKE_SYSTEM_PROCESSOR arm)
+
+# Toolchain prefix
+set(TOOLCHAIN_PREFIX arm-none-eabi-)
+
+# Derleyiciler
+set(CMAKE_C_COMPILER   ${TOOLCHAIN_PREFIX}gcc)
+set(CMAKE_ASM_COMPILER ${TOOLCHAIN_PREFIX}gcc)
+set(CMAKE_CXX_COMPILER ${TOOLCHAIN_PREFIX}g++)
+set(CMAKE_OBJCOPY      ${TOOLCHAIN_PREFIX}objcopy)
+set(CMAKE_OBJDUMP      ${TOOLCHAIN_PREFIX}objdump)
+set(CMAKE_SIZE         ${TOOLCHAIN_PREFIX}size)
+set(CMAKE_AR           ${TOOLCHAIN_PREFIX}ar)
+
+# Compiler testi devre dışı (cross-compile için gerekli)
+set(CMAKE_TRY_COMPILE_TARGET_TYPE STATIC_LIBRARY)
+
+# Arama yolları
+set(CMAKE_FIND_ROOT_PATH_MODE_PROGRAM NEVER)
+set(CMAKE_FIND_ROOT_PATH_MODE_LIBRARY ONLY)
+set(CMAKE_FIND_ROOT_PATH_MODE_INCLUDE ONLY)
+set(CMAKE_FIND_ROOT_PATH_MODE_PACKAGE ONLY)

@@ -1,0 +1,37 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual Environments
+.venv/
+venv/
+env/
+ENV/
+
+# PyInstaller / Build outputs
+build/
+build_pyinstaller/
+dist/
+*.spec
+
+# ARM GCC firmware build outputs
+firmware/build/
+*.elf
+*.map
+*.o
+*.d
+
+# OS / Editor generated files
+.vscode/
+.idea/
+*.swp
+*~
+Thumbs.db
+Desktop.ini
+
+# Large proprietary setup executables & zip dumps
+*.exe
+*.zip
+*.rar
+!tools/firmware_analyzer/D878UVII PLUS V4.00 official release 250815/D878UVscreens/*.bmp
