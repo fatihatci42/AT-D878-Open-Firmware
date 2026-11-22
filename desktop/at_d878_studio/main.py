@@ -15,7 +15,7 @@ from PySide6.QtWidgets import (
     QStatusBar, QMessageBox, QComboBox, QFileDialog, QProgressBar,
     QTextEdit, QCheckBox, QGroupBox, QRadioButton, QButtonGroup,
     QLineEdit, QHeaderView, QFrame, QSpinBox, QSlider, QTabWidget,
-    QSplitter
+    QSplitter, QGridLayout
 )
 from PySide6.QtCore import Qt, QThread, Signal, QTimer
 from PySide6.QtGui import QPixmap, QColor, QFont, QPainter, QBrush, QPen
@@ -68,9 +68,10 @@ class RadioLCDWidget(QWidget):
     Renders an authentic AnyTone 1.77" TFT LCD (160x128) simulation
     based on official V4.00 Display Indicators.
     """
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, scale=1.5):
         super().__init__(parent)
-        self.setFixedSize(160 * 2, 128 * 2) # 320x256 scaled 2x
+        self.scale_factor = scale
+        self.setFixedSize(int(160 * scale), int(128 * scale)) # 240x192 at 1.5x
         self.setStyleSheet("background-color: #000000; border: 2px solid #334155; border-radius: 4px;")
         
         # State
@@ -92,12 +93,280 @@ class RadioLCDWidget(QWidget):
         self.bt_active = True
         self.rssi_level = 4 # 0..4
 
+        # Menü Navigasyon Sistemi (AnyTone D878 Birebir)
+        self.menu_active = False
+        self.current_menu_id = "main"
+        self.menu_selected = 0
+        self.menu_scroll = 0
+        self.menus = {
+            "main": {
+                "title": "ANA MENU",
+                "items": [
+                    {"name": "1. Telsiz Ayarlari", "type": "sub", "sub": "radio"},
+                    {"name": "2. DMR Ayarlari",    "type": "sub", "sub": "dmr"},
+                    {"name": "3. APRS & GPS",      "type": "sub", "sub": "aprs"},
+                    {"name": "4. Bluetooth",       "type": "sub", "sub": "bt"},
+                    {"name": "5. Cihaz Bilgisi",   "type": "sub", "sub": "about"},
+                ]
+            },
+            "radio": {
+                "title": "TELSIZ AYARLARI",
+                "parent": "main",
+                "items": [
+                    {"name": "TX Gucu",      "type": "val", "values": ["TURBO", "HIGH", "MID", "LOW"], "val_idx": 0},
+                    {"name": "Squelch",      "type": "val", "values": ["0", "1", "2", "3", "4", "5", "6", "7", "8"], "val_idx": 3},
+                    {"name": "Tus Sesi",     "type": "val", "values": ["[ACIK]", "[KPLI]"], "val_idx": 0},
+                    {"name": "Ekran Isigi",  "type": "val", "values": ["10 s", "30 s", "SUREKLI"], "val_idx": 0},
+                    {"name": "Parlaklik",    "type": "val", "values": ["1", "2", "3", "4", "5"], "val_idx": 3},
+                    {"name": "Dil Secimi",   "type": "val", "values": ["TURKCE", "ENGLISH"], "val_idx": 0},
+                ]
+            },
+            "dmr": {
+                "title": "DMR AYARLARI",
+                "parent": "main",
+                "items": [
+                    {"name": "Renk Kodu",    "type": "val", "values": ["CC 1", "CC 2", "CC 3"], "val_idx": 0},
+                    {"name": "Zaman Slotu",  "type": "val", "values": ["Slot 1", "Slot 2"], "val_idx": 0},
+                    {"name": "Grup (TG)",    "type": "val", "values": ["TG 286 (TR)", "TG 91 (WW)", "TG 9 (Local)"], "val_idx": 0},
+                    {"name": "Radio ID",     "type": "val", "values": ["2860501"], "val_idx": 0},
+                ]
+            },
+            "aprs": {
+                "title": "APRS & GPS",
+                "parent": "main",
+                "items": [
+                    {"name": "Konum Gonder", "type": "action", "val": "[GONDER]"},
+                    {"name": "GPS Durumu",   "type": "val", "values": ["[AKTIF]", "[KAPALI]"], "val_idx": 0},
+                    {"name": "Frekans",      "type": "val", "values": ["144.800 MHz"], "val_idx": 0},
+                    {"name": "Cagri Kodu",   "type": "val", "values": ["TA5THK-7"], "val_idx": 0},
+                ]
+            },
+            "bt": {
+                "title": "BLUETOOTH",
+                "parent": "main",
+                "items": [
+                    {"name": "BT Gucu",      "type": "val", "values": ["[KPLI]", "[ACIK]"], "val_idx": 0},
+                    {"name": "Baglanti",     "type": "val", "values": ["Bos"], "val_idx": 0},
+                ]
+            },
+            "about": {
+                "title": "CIHAZ BILGISI",
+                "parent": "main",
+                "items": [
+                    {"name": "Model",        "type": "val", "values": ["D878UVII+"], "val_idx": 0},
+                    {"name": "Firmware",     "type": "val", "values": ["Open v0.1"], "val_idx": 0},
+                    {"name": "MCU",          "type": "val", "values": ["GD32F303"], "val_idx": 0},
+                    {"name": "Saat",         "type": "val", "values": ["120 MHz"], "val_idx": 0},
+                    {"name": "Cagri",        "type": "val", "values": ["TA5THK"], "val_idx": 0},
+                ]
+            }
+        }
+
+    def menu_up(self):
+        if not self.menu_active:
+            return
+        m = self.menus[self.current_menu_id]
+        if self.menu_selected > 0:
+            self.menu_selected -= 1
+            if self.menu_selected < self.menu_scroll:
+                self.menu_scroll = self.menu_selected
+        else:
+            self.menu_selected = len(m["items"]) - 1
+            if len(m["items"]) > 5:
+                self.menu_scroll = len(m["items"]) - 5
+        self.update()
+
+    def menu_down(self):
+        if not self.menu_active:
+            return
+        m = self.menus[self.current_menu_id]
+        if self.menu_selected < len(m["items"]) - 1:
+            self.menu_selected += 1
+            if self.menu_selected >= self.menu_scroll + 5:
+                self.menu_scroll = self.menu_selected - 4
+        else:
+            self.menu_selected = 0
+            self.menu_scroll = 0
+        self.update()
+
+    def menu_enter(self):
+        if not self.menu_active:
+            self.menu_active = True
+            self.current_menu_id = "main"
+            self.menu_selected = 0
+            self.menu_scroll = 0
+            self.update()
+            return
+        m = self.menus[self.current_menu_id]
+        item = m["items"][self.menu_selected]
+        if item.get("type") == "sub":
+            self.current_menu_id = item["sub"]
+            self.menu_selected = 0
+            self.menu_scroll = 0
+        elif item.get("type") == "val":
+            vals = item["values"]
+            item["val_idx"] = (item["val_idx"] + 1) % len(vals)
+        self.update()
+
+    def menu_back(self):
+        if not self.menu_active:
+            return
+        m = self.menus[self.current_menu_id]
+        parent = m.get("parent")
+        if parent:
+            self.current_menu_id = parent
+            self.menu_selected = 0
+            self.menu_scroll = 0
+        else:
+            self.menu_active = False
+        self.update()
+
+    def menu_toggle(self):
+        self.menu_active = not self.menu_active
+        if self.menu_active:
+            self.current_menu_id = "main"
+            self.menu_selected = 0
+            self.menu_scroll = 0
+        self.update()
+
+    def key_digit(self, digit_str):
+        if self.menu_active:
+            try:
+                num = int(digit_str)
+                m = self.menus[self.current_menu_id]
+                if 1 <= num <= len(m["items"]):
+                    self.menu_selected = num - 1
+                    self.update()
+            except ValueError:
+                pass
+        else:
+            if not hasattr(self, 'freq_buffer'):
+                self.freq_buffer = ""
+            if digit_str in "0123456789":
+                self.freq_buffer += digit_str
+                if len(self.freq_buffer) > 8:
+                    self.freq_buffer = digit_str
+                f_padded = self.freq_buffer.ljust(8, '0')
+                formatted = f"{f_padded[:3]}.{f_padded[3:6]}.{f_padded[6:8]}"
+                if self.active_vfo == "A":
+                    self.vfo_a_freq = formatted
+                else:
+                    self.vfo_b_freq = formatted
+                self.update()
+
+    def key_star(self):
+        self.freq_buffer = ""
+        self.update()
+
+    def key_hash(self):
+        if self.active_vfo == "A":
+            self.vfo_a_mode = "DMR" if self.vfo_a_mode == "FM" else "FM"
+        else:
+            self.vfo_b_mode = "DMR" if self.vfo_b_mode == "FM" else "FM"
+        self.update()
+
+    def step_freq(self, up=True):
+        if self.menu_active:
+            if up:
+                self.menu_up()
+            else:
+                self.menu_down()
+            return
+        attr = "vfo_a_freq" if self.active_vfo == "A" else "vfo_b_freq"
+        cur_str = getattr(self, attr).replace(".", "")
+        try:
+            val = int(cur_str)
+            step = 1250 # 12.5 kHz
+            val = val + step if up else val - step
+            if val < 13400000: val = 13400000
+            if val > 52000000: val = 52000000
+            val_str = f"{val:08d}"
+            setattr(self, attr, f"{val_str[:3]}.{val_str[3:6]}.{val_str[6:8]}")
+            self.update()
+        except ValueError:
+            pass
+
+    def toggle_vfo(self):
+        self.active_vfo = "B" if self.active_vfo == "A" else "A"
+        self.update()
+
+    def toggle_power(self):
+        p_seq = ["T", "H", "M", "L"]
+        cur = self.power_level
+        nxt = p_seq[(p_seq.index(cur) + 1) % len(p_seq)]
+        self.power_level = nxt
+        self.update()
+
     def paintEvent(self, event):
         painter = QPainter(self)
-        painter.scale(2.0, 2.0)
+        painter.scale(self.scale_factor, self.scale_factor)
         
         # Arka plan
         painter.fillRect(0, 0, 160, 128, QColor("#000000"))
+
+        # EĞER MENÜ AKTİFSE: Menü Ekranını Çiz
+        if self.menu_active:
+            m = self.menus[self.current_menu_id]
+            # 1. Üst Başlık Çubuğu
+            painter.fillRect(0, 0, 160, 16, QColor("#0F172A"))
+            painter.setPen(QColor("#FBBF24"))
+            painter.setFont(QFont("Segoe UI", 7, QFont.Bold))
+            painter.drawText(6, 12, m["title"])
+
+            painter.setPen(QColor("#FFFFFF"))
+            painter.setFont(QFont("Segoe UI", 6))
+            page_info = f"{self.menu_selected + 1}/{len(m['items'])}"
+            painter.drawText(130, 12, page_info)
+
+            # 2. Menü Satırları (18..112)
+            visible_count = min(5, len(m["items"]) - self.menu_scroll)
+            for i in range(visible_count):
+                idx = self.menu_scroll + i
+                item = m["items"][idx]
+                is_sel = (idx == self.menu_selected)
+
+                row_y = 18 + (i * 19)
+                row_bg = QColor("#09182B") if is_sel else QColor("#050A12")
+                painter.fillRect(0, row_y, 160, 18, row_bg)
+                if is_sel:
+                    painter.setPen(QPen(QColor("#1E3A5F"), 1))
+                    painter.drawRect(0, row_y, 159, 18)
+
+                # İmleç
+                if is_sel:
+                    painter.setPen(QColor("#FBBF24"))
+                    painter.setFont(QFont("Segoe UI", 7, QFont.Bold))
+                    painter.drawText(4, row_y + 13, "▶")
+
+                # Metin
+                painter.setPen(QColor("#FFFFFF") if is_sel else QColor("#94A3B8"))
+                painter.setFont(QFont("Segoe UI", 6, QFont.Bold if is_sel else QFont.Normal))
+                painter.drawText(14, row_y + 13, item["name"])
+
+                # Değer
+                val_text = ""
+                if item.get("type") == "sub":
+                    val_text = ">>"
+                elif item.get("type") == "val":
+                    vals = item["values"]
+                    v_idx = item.get("val_idx", 0)
+                    val_text = vals[v_idx]
+                elif item.get("type") == "action":
+                    val_text = item.get("val", "")
+
+                if val_text:
+                    painter.setPen(QColor("#FBBF24") if is_sel else QColor("#38BDF8"))
+                    painter.setFont(QFont("Segoe UI", 6, QFont.Bold))
+                    painter.drawText(106, row_y + 13, val_text)
+
+            # 3. Alt Yumuşak Tuşlar
+            painter.fillRect(0, 114, 160, 14, QColor("#1E293B"))
+            painter.setPen(QColor("#10B981"))
+            painter.setFont(QFont("Segoe UI", 6, QFont.Bold))
+            painter.drawText(8, 124, "[SEC]")
+            painter.setPen(QColor("#EF4444"))
+            painter.drawText(125, 124, "[GERI]")
+            return
 
         # 1. ÜST DURUM ÇUBUĞU (Status Bar 0..14)
         painter.fillRect(0, 0, 160, 14, QColor("#0F172A"))
@@ -216,6 +485,362 @@ class RadioLCDWidget(QWidget):
             painter.drawText(10, 124, "Menü")
             painter.drawText(68, 124, "Bölge")
             painter.drawText(125, 124, "Tara")
+
+
+# -----------------------------------------------------------------------------
+# ANYTONE FİZİKSEL KASA & ETKİLEŞİMLİ ŞABLON WIDGET'I
+# -----------------------------------------------------------------------------
+class AnyToneHandsetWidget(QFrame):
+    """
+    Kullanıcının paylaştığı fiziksel AnyTone AT-D878UVII Plus şablonunun birebir
+    interaktif simülatör karşılığı:
+      - Üst: Anten, Döner Kanal Düğmesi (CH), Ses/Güç Düğmesi (VOL), PF3 Yeşil Tepe Tuşu
+      - Sol Yan: Taktik Mandallı PTT Tuşu, PF1 ve PF2 Yan Tuşları
+      - Ön Panel:
+        * AnyTone Metalik Logo
+        * 1.77" Renkli TFT LCD (160x128 RGB565)
+        * Fonksiyon Tuşları: [-] MENU, 4 Yönlü D-Pad Halka Tuşu (▲ ▼ ◀ ▶ OK), [--] EXIT
+        * P1 ve P2 Programlanabilir Tuşları
+        * Akustik Hoparlör Izgarası
+        * 12 Tuşlu Alfanumerik Keypad (1-9, *, 0, #)
+    """
+    def __init__(self, lcd: RadioLCDWidget, parent=None):
+        super().__init__(parent)
+        self.lcd = lcd
+        self.setFixedWidth(340)
+        self.setStyleSheet("""
+            QFrame#HandsetOuter {
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #11151C, stop:0.04 #1E2430, stop:0.96 #1E2430, stop:1 #11151C);
+                border: 2px solid #334155;
+                border-radius: 24px;
+            }
+        """)
+        self.setObjectName("HandsetOuter")
+        self.init_ui()
+
+    def init_ui(self):
+        main_layout = QVBoxLayout(self)
+        main_layout.setContentsMargins(12, 8, 12, 14)
+        main_layout.setSpacing(6)
+
+        # 1. ÜST BÖLÜM: ANTEN, KANAL VE SES DÜĞMELERİ, PF3 TEPE TUŞU
+        top_bar = QHBoxLayout()
+        top_bar.setSpacing(6)
+
+        # Anten
+        lbl_antenna = QLabel("║")
+        lbl_antenna.setToolTip("AnyTone VHF/UHF Helical Anten")
+        lbl_antenna.setStyleSheet("""
+            background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #0F172A, stop:0.5 #334155, stop:1 #0F172A);
+            color: #94A3B8; font-size: 14px; font-weight: 900;
+            border: 1px solid #1E293B; border-top-left-radius: 6px; border-top-right-radius: 6px;
+            padding: 4px;
+        """)
+        lbl_antenna.setAlignment(Qt.AlignCenter)
+        lbl_antenna.setFixedSize(24, 38)
+        top_bar.addWidget(lbl_antenna)
+
+        # Kanal Döner Düğmesi (Rotary Encoder)
+        ch_box = QHBoxLayout()
+        ch_box.setSpacing(1)
+        btn_ch_dec = QPushButton("◀")
+        btn_ch_dec.setToolTip("Kanal/Frekans Azalt (Encoder Sol)")
+        btn_ch_dec.setFixedSize(22, 28)
+        btn_ch_dec.setStyleSheet("background: #0F172A; border: 1px solid #334155; border-radius: 4px; color: #94A3B8; font-size: 10px; font-weight: 700;")
+        btn_ch_dec.clicked.connect(lambda: self.lcd.step_freq(False))
+
+        lbl_ch = QLabel("CH\nENCD")
+        lbl_ch.setAlignment(Qt.AlignCenter)
+        lbl_ch.setFixedSize(34, 36)
+        lbl_ch.setStyleSheet("background: #0B0F17; border: 2px solid #475569; border-radius: 6px; color: #38BDF8; font-size: 8px; font-weight: 800;")
+
+        btn_ch_inc = QPushButton("▶")
+        btn_ch_inc.setToolTip("Kanal/Frekans Artır (Encoder Sağ)")
+        btn_ch_inc.setFixedSize(22, 28)
+        btn_ch_inc.setStyleSheet("background: #0F172A; border: 1px solid #334155; border-radius: 4px; color: #94A3B8; font-size: 10px; font-weight: 700;")
+        btn_ch_inc.clicked.connect(lambda: self.lcd.step_freq(True))
+
+        ch_box.addWidget(btn_ch_dec)
+        ch_box.addWidget(lbl_ch)
+        ch_box.addWidget(btn_ch_inc)
+        top_bar.addLayout(ch_box)
+
+        # Ses / Güç Düğmesi
+        lbl_vol = QLabel("VOL\nPOW")
+        lbl_vol.setAlignment(Qt.AlignCenter)
+        lbl_vol.setFixedSize(36, 36)
+        lbl_vol.setStyleSheet("background: #0B0F17; border: 2px solid #475569; border-radius: 6px; color: #F59E0B; font-size: 8px; font-weight: 800;")
+        top_bar.addWidget(lbl_vol)
+
+        # PF3 Tepe Yeşil Tuşu
+        btn_pf3 = QPushButton("PF3")
+        btn_pf3.setToolTip("PF3: APRS Konum Paketi Gönder / Alarm")
+        btn_pf3.setFixedSize(34, 36)
+        btn_pf3.setStyleSheet("""
+            QPushButton {
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #10B981, stop:1 #047857);
+                border: 2px solid #065F46; border-radius: 6px;
+                color: white; font-size: 9px; font-weight: 900;
+            }
+            QPushButton:hover { background: #059669; }
+            QPushButton:pressed { background: #064E3B; }
+        """)
+        btn_pf3.clicked.connect(self.on_pf3_click)
+        top_bar.addWidget(btn_pf3)
+
+        main_layout.addLayout(top_bar)
+
+        # 2. GÖVDE: SOL YAN TUŞLAR (PTT / PF1 / PF2) + ORTA ÖN PANEL
+        body_h = QHBoxLayout()
+        body_h.setSpacing(6)
+
+        # Sol Yan Tuşlar Paneli
+        side_v = QVBoxLayout()
+        side_v.setSpacing(4)
+        side_v.addSpacing(28)
+
+        # PTT Tuşu
+        self.btn_ptt = QPushButton("P\nT\nT")
+        self.btn_ptt.setToolTip("PTT (Mandal): Basılı tutarak konuş / iletime geç")
+        self.btn_ptt.setFixedSize(28, 90)
+        self.style_ptt_normal = """
+            QPushButton {
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #7F1D1D, stop:0.4 #DC2626, stop:1 #7F1D1D);
+                border: 2px solid #991B1B; border-radius: 6px;
+                color: white; font-size: 11px; font-weight: 900;
+            }
+            QPushButton:hover { background: #EF4444; }
+        """
+        self.style_ptt_active = """
+            QPushButton {
+                background: #F87171; border: 2px solid #FFFFFF; border-radius: 6px;
+                color: #000; font-size: 11px; font-weight: 900;
+            }
+        """
+        self.btn_ptt.setStyleSheet(self.style_ptt_normal)
+        self.btn_ptt.pressed.connect(self.on_ptt_pressed)
+        self.btn_ptt.released.connect(self.on_ptt_released)
+        side_v.addWidget(self.btn_ptt)
+
+        # PF1 Tuşu
+        btn_pf1 = QPushButton("PF1")
+        btn_pf1.setToolTip("PF1: Monitör / Squelch Geçici Aç")
+        btn_pf1.setFixedSize(28, 30)
+        btn_pf1.setStyleSheet("background: #1E293B; border: 1px solid #475569; border-radius: 4px; color: #CBD5E1; font-size: 8px; font-weight: 700;")
+        btn_pf1.clicked.connect(lambda: self.lcd.step_freq(True))
+        side_v.addWidget(btn_pf1)
+
+        # PF2 Tuşu
+        btn_pf2 = QPushButton("PF2")
+        btn_pf2.setToolTip("PF2: Gerilim Oku / Ayar")
+        btn_pf2.setFixedSize(28, 30)
+        btn_pf2.setStyleSheet("background: #1E293B; border: 1px solid #475569; border-radius: 4px; color: #CBD5E1; font-size: 8px; font-weight: 700;")
+        btn_pf2.clicked.connect(lambda: self.lcd.step_freq(False))
+        side_v.addWidget(btn_pf2)
+
+        side_v.addStretch()
+        body_h.addLayout(side_v)
+
+        # Orta Panel (Ekran, D-Pad, Tuş Takımı)
+        front_v = QVBoxLayout()
+        front_v.setSpacing(4)
+        front_v.setContentsMargins(0, 0, 0, 0)
+
+        # AnyTone Logo
+        lbl_logo = QLabel("<i>AnyTone</i>")
+        lbl_logo.setAlignment(Qt.AlignCenter)
+        lbl_logo.setStyleSheet("color: #E2E8F0; font-size: 14px; font-weight: 900; letter-spacing: 2px;")
+        front_v.addWidget(lbl_logo)
+
+        # LCD Ekran Çerçevesi
+        screen_frame = QFrame()
+        screen_frame.setStyleSheet("background: #000000; border: 2px solid #0F172A; border-radius: 6px; padding: 2px;")
+        sf_lay = QVBoxLayout(screen_frame)
+        sf_lay.setContentsMargins(0, 0, 0, 0)
+        sf_lay.addWidget(self.lcd, alignment=Qt.AlignCenter)
+        front_v.addWidget(screen_frame, alignment=Qt.AlignCenter)
+
+        # 3. FONKSİYON TUŞLARI & D-PAD NAVİGASYON HALKASI (Şablondaki birebir yerleşim)
+        # Sol: [-] MENU | Orta: [▲ ▼ ◀ ▶ OK] | Sağ: [--] EXIT
+        fn_row = QHBoxLayout()
+        fn_row.setSpacing(4)
+
+        # [-] Menu Tuşu (AnyTone Tek Çizgi)
+        self.btn_menu = QPushButton("—\nMENU")
+        self.btn_menu.setToolTip("Menü / Seç / Onayla Tuşu")
+        self.btn_menu.setFixedSize(54, 46)
+        self.btn_menu.setStyleSheet("""
+            QPushButton {
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #1E293B, stop:1 #0F172A);
+                border: 2px solid #059669; border-radius: 8px;
+                color: #10B981; font-size: 9px; font-weight: 900;
+            }
+            QPushButton:hover { background: #064E3B; color: white; border-color: #10B981; }
+            QPushButton:pressed { background: #10B981; color: black; }
+        """)
+        self.btn_menu.clicked.connect(self.lcd.menu_enter)
+        fn_row.addWidget(self.btn_menu)
+
+        # Orta D-Pad Halka Navigasyon Grubu
+        dpad_grid = QGridLayout()
+        dpad_grid.setSpacing(2)
+
+        btn_up = QPushButton("▲")
+        btn_up.setToolTip("Yukarı / Frekans Artır")
+        btn_up.setFixedSize(28, 20)
+        btn_up.setStyleSheet("background: #1E293B; border: 1px solid #475569; border-radius: 4px; color: #FBBF24; font-size: 9px; font-weight: 700;")
+        btn_up.clicked.connect(self.on_nav_up)
+        dpad_grid.addWidget(btn_up, 0, 1)
+
+        btn_left = QPushButton("◀")
+        btn_left.setToolTip("Sol / VFO-A")
+        btn_left.setFixedSize(26, 20)
+        btn_left.setStyleSheet("background: #1E293B; border: 1px solid #475569; border-radius: 4px; color: #38BDF8; font-size: 9px; font-weight: 700;")
+        btn_left.clicked.connect(self.on_nav_left)
+        dpad_grid.addWidget(btn_left, 1, 0)
+
+        btn_ok = QPushButton("OK")
+        btn_ok.setToolTip("Tamam / Menü Aç / Gir")
+        btn_ok.setFixedSize(28, 20)
+        btn_ok.setStyleSheet("background: #0284C7; border: 1px solid #38BDF8; border-radius: 4px; color: white; font-size: 8px; font-weight: 900;")
+        btn_ok.clicked.connect(self.lcd.menu_enter)
+        dpad_grid.addWidget(btn_ok, 1, 1)
+
+        btn_right = QPushButton("▶")
+        btn_right.setToolTip("Sağ / VFO-B")
+        btn_right.setFixedSize(26, 20)
+        btn_right.setStyleSheet("background: #1E293B; border: 1px solid #475569; border-radius: 4px; color: #38BDF8; font-size: 9px; font-weight: 700;")
+        btn_right.clicked.connect(self.on_nav_right)
+        dpad_grid.addWidget(btn_right, 1, 2)
+
+        btn_down = QPushButton("▼")
+        btn_down.setToolTip("Aşağı / Frekans Azalt")
+        btn_down.setFixedSize(28, 20)
+        btn_down.setStyleSheet("background: #1E293B; border: 1px solid #475569; border-radius: 4px; color: #FBBF24; font-size: 9px; font-weight: 700;")
+        btn_down.clicked.connect(self.on_nav_down)
+        dpad_grid.addWidget(btn_down, 2, 1)
+
+        fn_row.addLayout(dpad_grid)
+
+        # [--] Exit Tuşu (AnyTone Çift Çizgi)
+        self.btn_exit = QPushButton("——\nEXIT")
+        self.btn_exit.setToolTip("Çıkış / Geri / İptal Tuşu")
+        self.btn_exit.setFixedSize(54, 46)
+        self.btn_exit.setStyleSheet("""
+            QPushButton {
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #1E293B, stop:1 #0F172A);
+                border: 2px solid #DC2626; border-radius: 8px;
+                color: #EF4444; font-size: 9px; font-weight: 900;
+            }
+            QPushButton:hover { background: #7F1D1D; color: white; border-color: #EF4444; }
+            QPushButton:pressed { background: #DC2626; color: white; }
+        """)
+        self.btn_exit.clicked.connect(self.lcd.menu_back)
+        fn_row.addWidget(self.btn_exit)
+
+        front_v.addLayout(fn_row)
+
+        # 4. P1 ve P2 PROGRAMLANABİLİR TUŞLAR
+        p_row = QHBoxLayout()
+        p_row.setSpacing(6)
+
+        btn_p1 = QPushButton("P1 (VFO)")
+        btn_p1.setToolTip("P1: VFO-A / VFO-B Geçişi Yap")
+        btn_p1.setFixedSize(110, 24)
+        btn_p1.setStyleSheet("background: #1E2530; border: 1px solid #475569; border-radius: 4px; color: #E2E8F0; font-size: 9px; font-weight: 700;")
+        btn_p1.clicked.connect(self.lcd.toggle_vfo)
+        p_row.addWidget(btn_p1)
+
+        btn_p2 = QPushButton("P2 (GÜÇ)")
+        btn_p2.setToolTip("P2: TX Çıkış Gücünü Değiştir (Turbo/High/Mid/Low)")
+        btn_p2.setFixedSize(110, 24)
+        btn_p2.setStyleSheet("background: #1E2530; border: 1px solid #475569; border-radius: 4px; color: #E2E8F0; font-size: 9px; font-weight: 700;")
+        btn_p2.clicked.connect(self.lcd.toggle_power)
+        p_row.addWidget(btn_p2)
+
+        front_v.addLayout(p_row)
+
+        # 5. AKUSTİK HOPARLÖR IZGARASI
+        lbl_grille = QLabel("••••••••••    ••••••••••")
+        lbl_grille.setAlignment(Qt.AlignCenter)
+        lbl_grille.setStyleSheet("color: #334155; font-size: 10px; font-weight: 900; letter-spacing: 3px; margin: 2px 0;")
+        front_v.addWidget(lbl_grille)
+
+        # 6. 12 TUŞLU ALFANUMERİK KEYPAD (Şablondaki 4x3 yerleşim)
+        key_grid = QGridLayout()
+        key_grid.setSpacing(3)
+
+        keys_data = [
+            ("1 !<",   "1", 0, 0), ("2 ABC",  "2", 0, 1), ("3 DEF",  "3", 0, 2),
+            ("4 GHI",  "4", 1, 0), ("5 JKL",  "5", 1, 1), ("6 MNO",  "6", 1, 2),
+            ("7 PQRS", "7", 2, 0), ("8 TUV",  "8", 2, 1), ("9 WXYZ", "9", 2, 2),
+            ("* ␣",    "*", 3, 0), ("0 +",    "0", 3, 1), ("# ↑",    "#", 3, 2),
+        ]
+
+        for label, val, r, c in keys_data:
+            btn = QPushButton(label)
+            btn.setFixedSize(70, 27)
+            btn.setStyleSheet("""
+                QPushButton {
+                    background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #1E2530, stop:1 #11151C);
+                    border: 1px solid #334155; border-radius: 5px;
+                    color: #F8FAFC; font-size: 8px; font-weight: 700;
+                }
+                QPushButton:hover { background: #334155; border-color: #64748B; }
+                QPushButton:pressed { background: #0284C7; color: white; }
+            """)
+            if val in "0123456789":
+                btn.clicked.connect(lambda _, d=val: self.lcd.key_digit(d))
+            elif val == "*":
+                btn.clicked.connect(self.lcd.key_star)
+            elif val == "#":
+                btn.clicked.connect(self.lcd.key_hash)
+            key_grid.addWidget(btn, r, c)
+
+        front_v.addLayout(key_grid)
+        body_h.addLayout(front_v)
+        main_layout.addLayout(body_h)
+
+    def on_ptt_pressed(self):
+        self.btn_ptt.setStyleSheet(self.style_ptt_active)
+        self.lcd.is_tx = True
+        self.lcd.update()
+
+    def on_ptt_released(self):
+        self.btn_ptt.setStyleSheet(self.style_ptt_normal)
+        self.lcd.is_tx = False
+        self.lcd.update()
+
+    def on_nav_up(self):
+        if self.lcd.menu_active:
+            self.lcd.menu_up()
+        else:
+            self.lcd.step_freq(True)
+
+    def on_nav_down(self):
+        if self.lcd.menu_active:
+            self.lcd.menu_down()
+        else:
+            self.lcd.step_freq(False)
+
+    def on_nav_left(self):
+        if self.lcd.menu_active:
+            self.lcd.menu_back()
+        else:
+            self.lcd.active_vfo = "A"
+            self.lcd.update()
+
+    def on_nav_right(self):
+        if self.lcd.menu_active:
+            self.lcd.menu_enter()
+        else:
+            self.lcd.active_vfo = "B"
+            self.lcd.update()
+
+    def on_pf3_click(self):
+        # PF3 tuşlandığında APRS konumunu gönder
+        self.lcd.battery_volts = "7.6V"
+        self.lcd.update()
 
 
 # -----------------------------------------------------------------------------
@@ -859,68 +1484,48 @@ class ATD878Studio(QMainWindow):
         # 2. Analiz & Emülasyon Başlatma Butonu
         self.btn_run_emulation = QPushButton("🔬 Firmware'i Yükle & Simülatörde Canlandır")
         self.btn_run_emulation.setProperty("class", "primary")
-        self.btn_run_emulation.setMinimumHeight(38)
+        self.btn_run_emulation.setMinimumHeight(42)
         self.btn_run_emulation.setStyleSheet("font-size: 13px; font-weight: 700;")
         self.btn_run_emulation.clicked.connect(self.run_firmware_analysis)
         c_lay.addWidget(self.btn_run_emulation)
 
-        # 3. Telsiz Etkileşim Tuşları
-        c_lay.addWidget(QLabel("<b>2. Telsiz Ön Panel Etkileşim Tuşları:</b>"))
-        btn_ptt = QPushButton("🎙️ PTT (Mandal) Basılı Tut")
-        btn_ptt.setStyleSheet("background: #DC2626; color: white; font-size: 13px; font-weight: 700; padding: 12px; border-radius: 6px;")
-        btn_ptt.pressed.connect(self.sim_ptt_down)
-        btn_ptt.released.connect(self.sim_ptt_up)
-        c_lay.addWidget(btn_ptt)
-
-        row_vfo = QHBoxLayout()
-        btn_vfo_a = QPushButton("VFO-A Seç")
-        btn_vfo_a.clicked.connect(lambda: self.sim_switch_vfo("A"))
-        btn_vfo_b = QPushButton("VFO-B Seç")
-        btn_vfo_b.clicked.connect(lambda: self.sim_switch_vfo("B"))
-        row_vfo.addWidget(btn_vfo_a)
-        row_vfo.addWidget(btn_vfo_b)
-        c_lay.addLayout(row_vfo)
-
-        btn_pwr = QPushButton("⚡ Güç Seviyesi Değiştir (T/H/M/L)")
-        btn_pwr.clicked.connect(self.sim_toggle_power)
-        c_lay.addWidget(btn_pwr)
-
-        btn_pf3 = QPushButton("📡 PF3: APRS Beacon Gönder")
-        btn_pf3.clicked.connect(self.sim_send_aprs)
-        c_lay.addWidget(btn_pf3)
+        # Emülasyon ve Analiz Konsolu
+        c_lay.addWidget(QLabel("<b>Cortex-M4 Donanım Analiz & Kayıtçı (Register) Raporu:</b>"))
+        self.sim_report_text = QTextEdit()
+        self.sim_report_text.setReadOnly(True)
+        self.sim_report_text.setMinimumHeight(240)
+        self.sim_report_text.setStyleSheet("background-color: #05080E; border: 1px solid #1E293B; color: #10B981; font-family: 'Consolas', monospace; font-size: 11px;")
+        self.sim_report_text.append("[*] AnyTone AT-D878UVII Plus Donanım Simülatörü Hazır.")
+        self.sim_report_text.append("[*] Sağdaki telsiz kasası üzerinden doğrudan [-] (MENU), [--] (EXIT), [▲][▼] D-Pad ve Tuş Takımı ile menüyü canlı test edebilirsiniz.")
+        c_lay.addWidget(self.sim_report_text)
 
         desc = QLabel(
-            "<b>Güvenli Sanal Laboratuvar:</b><br>"
-            "Unicorn Engine ARM Cortex-M4 emülatörü, derlediğiniz veya resmi AnyTone firmware "
-            "ikilisini bilgisayarınızın RAM'inde izole olarak yürütür. "
-            "Cihaza fiziksel yükleme yapmadan önce ekran arayüzünü, frekans yapılandırmalarını "
-            "ve vektör tablosunu %100 sıfır risk ile test edebilirsiniz."
+            "<b>Canlı Telsiz Donanım Laboratuvarı:</b><br>"
+            "• <b>[-] MENU:</b> Ana menüyü açar veya seçilen ayara girer.<br>"
+            "• <b>[▲] [▼] D-Pad:</b> Menüde gezinir veya VFO frekansını 12.5 kHz adımlar.<br>"
+            "• <b>[--] EXIT:</b> Bir üst menüye döner veya VFO ekranına çıkar.<br>"
+            "• <b>[P1] / [P2]:</b> VFO A/B geçişi ve TX güç kademesi değişimi.<br>"
+            "• <b>[PTT]:</b> Basılı tutarak TX mandala geçiş testi yapar.<br>"
+            "• <b>Keypad (0-9):</b> Menü öğelerini doğrudan numaralayarak seçer veya frekans girer."
         )
-        desc.setStyleSheet("color: #94A3B8; font-size: 11px; margin-top: 8px;")
+        desc.setStyleSheet("color: #94A3B8; font-size: 11px; margin-top: 8px; line-height: 1.4;")
         desc.setWordWrap(True)
         c_lay.addWidget(desc)
         c_lay.addStretch()
         layout.addWidget(ctrl_frame, 1)
 
-        # Sağ LCD Ekran ve Firmware Analiz Konsolu
+        # Sağ: Telsiz Kasası (AnyTone Handset Widget - Birebir Donanım Şablonu)
         right_frame = QFrame()
-        right_frame.setStyleSheet("background-color: #0A0F1D; border: 1px solid #1E293B; border-radius: 8px; padding: 14px;")
+        right_frame.setStyleSheet("background-color: #0A0F1D; border: 1px solid #1E293B; border-radius: 8px; padding: 10px;")
         r_lay = QVBoxLayout(right_frame)
+        r_lay.setContentsMargins(8, 8, 8, 8)
 
-        r_lay.addWidget(QLabel("<b>AnyTone 1.77\" Renkli TFT LCD (160x128 RGB565) Canlı Çıktısı:</b>"), alignment=Qt.AlignCenter)
-        self.lcd_screen = RadioLCDWidget()
-        r_lay.addWidget(self.lcd_screen, alignment=Qt.AlignCenter)
+        r_lay.addWidget(QLabel("<b>AnyTone AT-D878UVII Plus Fiziksel Ön Panel & Kasa:</b>"), alignment=Qt.AlignCenter)
+        self.lcd_screen = RadioLCDWidget(scale=1.5)
+        self.handset = AnyToneHandsetWidget(self.lcd_screen)
+        r_lay.addWidget(self.handset, alignment=Qt.AlignCenter)
 
-        # Emülasyon ve Analiz Konsolu
-        r_lay.addWidget(QLabel("<b>Cortex-M4 Donanım Analiz & Kayıtçı (Register) Raporu:</b>"))
-        self.sim_report_text = QTextEdit()
-        self.sim_report_text.setReadOnly(True)
-        self.sim_report_text.setMaximumHeight(160)
-        self.sim_report_text.setStyleSheet("background-color: #05080E; border: 1px solid #1E293B; color: #10B981; font-family: 'Consolas', monospace; font-size: 11px;")
-        self.sim_report_text.append("[*] Simülatör hazır. 'Firmware'i Yükle & Simülatörde Canlandır' butonuna basarak sanal testi başlatabilirsiniz.")
-        r_lay.addWidget(self.sim_report_text)
-
-        layout.addWidget(right_frame, 1)
+        layout.addWidget(right_frame, 0)
         return page
 
     def sim_select_open_fw(self):
