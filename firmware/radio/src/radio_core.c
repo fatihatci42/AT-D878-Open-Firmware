@@ -315,6 +315,9 @@ int radio_core_start_tx(void)
     /* RF Güç Kalibrasyonunu PA4 (DAC0) üzerinden uygula */
     calibration_apply_tx_power(ch->tx_freq_hz, ch->power);
 
+    /* Transmit Permit Tone (TPT) cıvıltısını yürüt */
+    tones_play_tpt(TPT_MODE_MOTOTRBO_CHIRP);
+
     if (at1846s_tx_on() != 0) {
         if (ch->mode == CH_MODE_DMR) {
             sct3258_dmr_tx_stop();

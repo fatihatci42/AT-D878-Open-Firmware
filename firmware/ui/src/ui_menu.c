@@ -10,6 +10,8 @@
 #include "driver_at1846s.h"
 #include "driver_sct3258.h"
 #include "driver_linkboard.h"
+#include "driver_rda5802.h"
+#include "driver_tones.h"
 #include <stdio.h>
 #include <string.h>
 
@@ -23,6 +25,7 @@ static int32_t s_beep = 1;            /* 0=Kapalı, 1=Açık */
 static int32_t s_backlight_time = 10; /* 5, 10, 30, 0=Sürekli */
 static int32_t s_brightness = 4;      /* 1-5 */
 static int32_t s_lang_sel = 0;        /* 0=Türkçe, 1=English */
+static int32_t s_tpt_mode = 1;        /* 0=Kapalı, 1=MotoTRBO, 2=Trunked, 3=Close Enc, 4=Muppet */
 
 static int32_t s_dmr_cc = 1;          /* 1-15 */
 static int32_t s_dmr_slot = 1;        /* 1, 2 */
@@ -30,6 +33,10 @@ static int32_t s_dmr_tg = 286;        /* Talkgroup: 286 Turkey */
 
 static int32_t s_bt_power = 0;        /* 0=Kapalı, 1=Açık */
 static int32_t s_gps_power = 1;       /* 0=Kapalı, 1=Açık */
+
+static int32_t s_fm_power = 0;        /* RDA5802N FM Radyo: 0=Kapalı, 1=Açık */
+static int32_t s_fm_freq_mhz_x10 = 1000; /* 100.0 MHz */
+static int32_t s_fm_vol = 12;         /* 0-15 */
 
 static bool s_menu_active = false;
 static menu_node_t *s_current_node = NULL;
@@ -62,6 +69,44 @@ static void action_toggle_bt(void)
     linkboard_bt_power(s_bt_power != 0);
 }
 
+static void action_toggle_fm(void)
+{
+    s_fm_power = !s_fm_power;
+    if (s_fm_power) {
+        rda5802_init();
+        rda5802_set_frequency((uint32_t)s_fm_freq_mhz_x10 * 100U);
+        rda5802_set_volume((uint8_t)s_fm_vol);
+    } else {
+        rda5802_power(false);
+    }
+}
+
+static void action_apply_fm_freq(void)
+{
+    if (s_fm_power) {
+        rda5802_set_frequency((uint32_t)s_fm_freq_mhz_x10 * 100U);
+    }
+}
+
+static void action_apply_fm_vol(void)
+{
+    if (s_fm_power) {
+        rda5802_set_volume((uint8_t)s_fm_vol);
+    }
+}
+
+static void action_fm_seek(void)
+{
+    if (s_fm_power) {
+        rda5802_seek(true);
+    }
+}
+
+static void action_test_tpt(void)
+{
+    tones_play_tpt((tpt_mode_t)s_tpt_mode);
+}
+
 /* ============================================================
  * Menü Hiyerarşi Tanımları
  * ============================================================ */
@@ -72,12 +117,14 @@ static menu_node_t node_radio_set;
 static menu_node_t node_dmr_set;
 static menu_node_t node_aprs_set;
 static menu_node_t node_bt_set;
+static menu_node_t node_fm_set;
 static menu_node_t node_about;
 
 /* 1. Telsiz Ayarları */
 static const menu_item_t items_radio_set[] = {
     { "TX Gucu",       "TX Power",       MENU_ACTION_VALUE_INT,  NULL, action_apply_radio, &s_tx_power, 0, 3, 1 },
     { "Squelch",       "Squelch",        MENU_ACTION_VALUE_INT,  NULL, action_apply_radio, &s_squelch,  0, 8, 1 },
+    { "Mandal Tonu",   "Permit Tone",    MENU_ACTION_VALUE_INT,  NULL, action_test_tpt,    &s_tpt_mode, 0, 4, 1 },
     { "Tus Sesi",      "Key Beep",       MENU_ACTION_TOGGLE,     NULL, NULL,               &s_beep,     0, 1, 1 },
     { "Ekran Isigi",   "Backlight (s)",  MENU_ACTION_VALUE_INT,  NULL, NULL,               &s_backlight_time, 0, 30, 5 },
     { "Parlaklik",     "Brightness",     MENU_ACTION_VALUE_INT,  NULL, NULL,               &s_brightness, 1, 5, 1 },
@@ -105,7 +152,15 @@ static const menu_item_t items_bt_set[] = {
     { "Baglanti: Yok", "Status: Idle",   MENU_ACTION_NONE,       NULL, NULL,               NULL, 0, 0, 0 },
 };
 
-/* 5. Cihaz Bilgisi */
+/* 5. FM Radyo (RDA5802N Ticari FM 87-108 MHz) */
+static const menu_item_t items_fm_set[] = {
+    { "FM Gucu",       "FM Power",       MENU_ACTION_TOGGLE,     NULL, action_toggle_fm,   &s_fm_power, 0, 1, 1 },
+    { "Frekans (MHz)", "Freq (MHz)",     MENU_ACTION_VALUE_INT,  NULL, action_apply_fm_freq, &s_fm_freq_mhz_x10, 875, 1080, 1 },
+    { "Kanal Ara >>",  "Seek Station",   MENU_ACTION_CALL_FUNC,  NULL, action_fm_seek,     NULL, 0, 0, 0 },
+    { "Ses Seviyesi",  "Volume",         MENU_ACTION_VALUE_INT,  NULL, action_apply_fm_vol,  &s_fm_vol, 0, 15, 1 },
+};
+
+/* 6. Cihaz Bilgisi */
 static const menu_item_t items_about[] = {
     { "Model: D878UV2","Model: D878UV2", MENU_ACTION_NONE,       NULL, NULL,               NULL, 0, 0, 0 },
     { "FW: Open v0.1", "FW: Open v0.1",  MENU_ACTION_NONE,       NULL, NULL,               NULL, 0, 0, 0 },
@@ -120,7 +175,8 @@ static const menu_item_t items_main[] = {
     { "2. DMR Ayarlari",    "2. DMR Settings",   MENU_ACTION_SUBMENU, &node_dmr_set,   NULL, NULL, 0, 0, 0 },
     { "3. APRS & GPS",      "3. APRS & GPS",     MENU_ACTION_SUBMENU, &node_aprs_set,  NULL, NULL, 0, 0, 0 },
     { "4. Bluetooth",       "4. Bluetooth",      MENU_ACTION_SUBMENU, &node_bt_set,    NULL, NULL, 0, 0, 0 },
-    { "5. Cihaz Bilgisi",   "5. Device Info",    MENU_ACTION_SUBMENU, &node_about,     NULL, NULL, 0, 0, 0 },
+    { "5. FM Radyo",        "5. FM Broadcast",   MENU_ACTION_SUBMENU, &node_fm_set,    NULL, NULL, 0, 0, 0 },
+    { "6. Cihaz Bilgisi",   "6. Device Info",    MENU_ACTION_SUBMENU, &node_about,     NULL, NULL, 0, 0, 0 },
 };
 
 /* Düğüm tanımları */
@@ -160,6 +216,16 @@ static menu_node_t node_bt_set = {
     .parent = &node_main,
     .items = items_bt_set,
     .item_count = sizeof(items_bt_set) / sizeof(items_bt_set[0]),
+    .selected_index = 0,
+    .scroll_offset = 0,
+};
+
+static menu_node_t node_fm_set = {
+    .title_tr = "FM RADYO",
+    .title_en = "FM BROADCAST",
+    .parent = &node_main,
+    .items = items_fm_set,
+    .item_count = sizeof(items_fm_set) / sizeof(items_fm_set[0]),
     .selected_index = 0,
     .scroll_offset = 0,
 };
@@ -309,6 +375,35 @@ bool ui_menu_handle_key(const key_event_t *event)
         return true;
     }
 
+    case KEY_P1:
+        /* 878techmods: P1 tuşu menüde bir tam sayfa aşağı atlar */
+        if (node->selected_index + MENU_MAX_ITEMS_PER_PAGE < node->item_count) {
+            node->selected_index += MENU_MAX_ITEMS_PER_PAGE;
+            node->scroll_offset = node->selected_index;
+        } else {
+            node->selected_index = node->item_count - 1;
+            if (node->item_count > MENU_MAX_ITEMS_PER_PAGE) {
+                node->scroll_offset = node->item_count - MENU_MAX_ITEMS_PER_PAGE;
+            }
+        }
+        return true;
+
+    case KEY_P2:
+        /* 878techmods: P2 tuşu menüde bir üst seviyeye döner */
+        if (node->parent) {
+            s_current_node = node->parent;
+            display_clear(COLOR_BLACK);
+        } else {
+            ui_menu_close();
+        }
+        return true;
+
+    case KEY_STAR:
+    case KEY_HASH:
+        /* 878techmods: * veya # menüden doğrudan ana ekrana çıkar */
+        ui_menu_close();
+        return true;
+
     case KEY_EXIT:
         if (node->parent) {
             s_current_node = node->parent;
@@ -374,7 +469,7 @@ void ui_menu_render(void)
         display_draw_string(14, row_y + 4, txt, text_fg, row_bg, 1);
 
         /* Değer / Durum Göstergesi */
-        char val_str[16];
+        char val_str[24];
         val_str[0] = '\0';
 
         if (item->type == MENU_ACTION_TOGGLE && item->val_ptr) {
@@ -384,6 +479,11 @@ void ui_menu_render(void)
             if (item->val_ptr == &s_tx_power) {
                 const char *pwr_str[] = {"TURBO", "HIGH", "MID", "LOW"};
                 snprintf(val_str, sizeof(val_str), "%s", pwr_str[*item->val_ptr]);
+            } else if (item->val_ptr == &s_tpt_mode) {
+                const char *tpt_names[] = {"KAPALI", "CHIRP", "TRUNK", "ENCOUNTR", "MANAH"};
+                snprintf(val_str, sizeof(val_str), "%s", tpt_names[*item->val_ptr % 5]);
+            } else if (item->val_ptr == &s_fm_freq_mhz_x10) {
+                snprintf(val_str, sizeof(val_str), "%d.%d MHz", (int)(*item->val_ptr / 10), (int)(*item->val_ptr % 10));
             } else {
                 snprintf(val_str, sizeof(val_str), "< %ld >", (long)*item->val_ptr);
             }

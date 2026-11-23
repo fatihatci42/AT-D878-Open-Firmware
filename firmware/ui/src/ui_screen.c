@@ -89,17 +89,27 @@ void ui_switch_screen(screen_type_t screen)
 
 void ui_draw_battery(uint8_t percentage, bool is_charging, int16_t x, int16_t y)
 {
-    (void)is_charging;
-    uint16_t border_col = COLOR_WHITE;
-    uint16_t fill_col = (percentage > 20) ? COLOR_GREEN : COLOR_RED;
+    uint16_t border_col = (percentage <= 1) ? COLOR_RED : COLOR_WHITE;
+    uint16_t fill_col = (percentage > 3) ? COLOR_GREEN : COLOR_RED;
 
     display_fill_rect(x, y, 14, 7, border_col);
     display_fill_rect(x + 14, y + 2, 2, 3, border_col);
     display_fill_rect(x + 1, y + 1, 12, 5, COLOR_BLACK);
 
-    uint8_t bars = (percentage > 70) ? 3 : ((percentage > 35) ? 2 : (percentage > 10 ? 1 : 0));
-    for (int i = 0; i < bars; i++) {
-        display_fill_rect(x + 2 + (i * 4), y + 2, 3, 3, fill_col);
+    if (is_charging) {
+        /* Şarj oluyor ikonu (Şimşek) */
+        display_draw_string(x + 4, y + 1, "~", COLOR_YELLOW, COLOR_BLACK, 1);
+        return;
+    }
+
+    uint8_t bars = (percentage > 50) ? 3 : ((percentage > 3) ? 2 : (percentage > 0 ? 1 : 0));
+    if (bars == 0) {
+        /* Şarj gerekli: Kırmızı uyarı / şimşek */
+        display_draw_string(x + 3, y + 1, "!", COLOR_RED, COLOR_BLACK, 1);
+    } else {
+        for (int i = 0; i < bars; i++) {
+            display_fill_rect(x + 2 + (i * 4), y + 2, 3, 3, fill_col);
+        }
     }
 }
 

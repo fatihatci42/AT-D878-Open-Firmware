@@ -100,6 +100,73 @@ void tones_transmit_ste_tail(ste_mode_t mode, uint16_t ctcss_freq_x10)
     }
 }
 
+/* MotoTRBO DMR TPT Chirp dizisi */
+static const tone_step_t TONE_SEQ_MOTOTRBO[] = {
+    { 1560, 80 },  /* 40ms attack delay kompanzasyonu */
+    { 1040, 60 },
+    { 0, 0 }
+};
+
+/* Motorola Trunked permit tone dizisi */
+static const tone_step_t TONE_SEQ_MOTO_TRUNKED[] = {
+    { 910, 60 },
+    { 0,   20 },
+    { 910, 30 },
+    { 0,   20 },
+    { 910, 70 },
+    { 0, 0 }
+};
+
+/* Close Encounters melodisi */
+static const tone_step_t TONE_SEQ_CLOSE_ENCOUNTERS[] = {
+    { 1175, 200 },
+    { 1319, 200 },
+    { 1047, 200 },
+    { 523,  200 },
+    { 784,  200 },
+    { 0, 0 }
+};
+
+/* Manah Manah melodisi */
+static const tone_step_t TONE_SEQ_MANAH_MANAH[] = {
+    { 1397, 150 },
+    { 1760, 150 },
+    { 1976, 50 },
+    { 1568, 50 },
+    { 1318, 50 },
+    { 0, 0 }
+};
+
+void tones_play_tpt(tpt_mode_t mode)
+{
+    const tone_step_t *seq = NULL;
+    switch (mode) {
+    case TPT_MODE_MOTOTRBO_CHIRP:
+        seq = TONE_SEQ_MOTOTRBO;
+        break;
+    case TPT_MODE_MOTO_TRUNKED:
+        seq = TONE_SEQ_MOTO_TRUNKED;
+        break;
+    case TPT_MODE_CLOSE_ENCOUNTERS:
+        seq = TONE_SEQ_CLOSE_ENCOUNTERS;
+        break;
+    case TPT_MODE_MANAH_MANAH:
+        seq = TONE_SEQ_MANAH_MANAH;
+        break;
+    case TPT_MODE_OFF:
+    default:
+        return;
+    }
+
+    /* Ton dizisini yürüt */
+    while (seq && seq->duration_ms > 0) {
+        if (seq->freq_hz > 0) {
+            /* AT1846S veya PWM üzerinden ton ver */
+        }
+        seq++;
+    }
+}
+
 bool tones_detect_ste_tail(ste_mode_t mode)
 {
     if (mode == STE_MODE_OFF) return false;

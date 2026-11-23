@@ -72,8 +72,8 @@ uint16_t hal_adc_read_channel(uint8_t channel)
 
 uint16_t hal_adc_read_battery_mv(void)
 {
-    /* Kanal 8 (PB0 batarya bölücü) oku */
-    uint16_t raw = hal_adc_read_channel(8);
+    /* Kanal 10 (PC0 batarya gerilim bölücü) oku */
+    uint16_t raw = hal_adc_read_channel(10);
     if (raw == 0) {
         /* Simülasyonda veya sensör yoksa varsayılan 7.6V döndür */
         return 7600;
@@ -86,16 +86,34 @@ uint16_t hal_adc_read_battery_mv(void)
     return (uint16_t)v_bat_mv;
 }
 
+uint8_t hal_adc_get_battery_bars(void)
+{
+    uint16_t mv = hal_adc_read_battery_mv();
+    if (mv >= BATTERY_VOLTAGE_3BAR_MV) return 3; /* > 7.46V: 3 blok */
+    if (mv >= BATTERY_VOLTAGE_2BAR_MV) return 2; /* 6.85V - 7.46V: 2 blok */
+    if (mv >= BATTERY_VOLTAGE_1BAR_MV) return 1; /* 6.43V - 6.85V: 1 blok */
+    return 0;                                    /* <= 6.43V: Şarj uyarısı */
+}
+
 uint8_t hal_adc_get_battery_percentage(void)
 {
     uint16_t mv = hal_adc_read_battery_mv();
     if (mv >= BATTERY_VOLTAGE_FULL_MV) return 100;
-    if (mv <= BATTERY_VOLTAGE_EMPTY_MV) return 0;
+    if (mv <= BATTERY_VOLTAGE_CUTOFF_MV) return 0;
 
-    /* Lineer hesaplama: (mv - empty) / (full - empty) * 100 */
-    uint32_t pct = (uint32_t)(mv - BATTERY_VOLTAGE_EMPTY_MV) * 100U /
-                   (BATTERY_VOLTAGE_FULL_MV - BATTERY_VOLTAGE_EMPTY_MV);
-    return (uint8_t)pct;
+    /* Fluke tablosuna göre kademeli kapasite hesaplaması */
+    if (mv >= BATTERY_VOLTAGE_3BAR_MV) {
+        /* 7460 - 8400 mV -> %50 - %100 */
+        return 50 + (uint8_t)(((uint32_t)(mv - BATTERY_VOLTAGE_3BAR_MV) * 50U) / (BATTERY_VOLTAGE_FULL_MV - BATTERY_VOLTAGE_3BAR_MV));
+    } else if (mv >= BATTERY_VOLTAGE_2BAR_MV) {
+        /* 6850 - 7460 mV -> %3 - %50 */
+        return 3 + (uint8_t)(((uint32_t)(mv - BATTERY_VOLTAGE_2BAR_MV) * 47U) / (BATTERY_VOLTAGE_3BAR_MV - BATTERY_VOLTAGE_2BAR_MV));
+    } else if (mv >= BATTERY_VOLTAGE_1BAR_MV) {
+        /* 6430 - 6850 mV -> %1 - %3 */
+        return 1 + (uint8_t)(((uint32_t)(mv - BATTERY_VOLTAGE_1BAR_MV) * 2U) / (BATTERY_VOLTAGE_2BAR_MV - BATTERY_VOLTAGE_1BAR_MV));
+    } else {
+        return 0;
+    }
 }
 
 bool hal_adc_is_low_battery(void)

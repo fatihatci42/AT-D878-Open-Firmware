@@ -60,6 +60,28 @@ typedef enum {
     STE_MODE_55HZ                /**< 55.2 Hz Çin standardı */
 } ste_mode_t;
 
+/* ============================================================
+ * Transmit Permit Tones (TPT) & Melodi Dizileri
+ * Kaynak: Jason Reilly VK7ZJA (878techmods.html - #TPTchirp)
+ * ============================================================ */
+typedef enum {
+    TPT_MODE_OFF = 0,
+    TPT_MODE_MOTOTRBO_CHIRP,     /**< Motorola MotoTRBO DMR TPT cıvıltı tonu (80ms attack + chirp) */
+    TPT_MODE_MOTO_TRUNKED,       /**< Motorola Trunked 3-ton dizisi (910Hz/60ms, 910Hz/30ms, 910Hz/70ms) */
+    TPT_MODE_CLOSE_ENCOUNTERS,   /**< Close Encounters film melodisi (1175, 1319, 1047, 523, 784 Hz) */
+    TPT_MODE_MANAH_MANAH         /**< Muppets Manah Manah melodisi */
+} tpt_mode_t;
+
+typedef struct {
+    uint16_t freq_hz;
+    uint16_t duration_ms;
+} tone_step_t;
+
+/**
+ * @brief TX başlangıcında Transmit Permit Tone (TPT) veya bildirim melodisi çal
+ */
+void tones_play_tpt(tpt_mode_t mode);
+
 /**
  * @brief TX bitişinde Squelch Tail Elimination (STE) dizisini yürüt
  * @param mode STE modu

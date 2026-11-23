@@ -28,9 +28,22 @@ extern "C" {
 #define MAX_ZONE_NAME_LEN          16
 
 /* ============================================================
- * Flash Bellek Haritası (Memory Map)
+ * Toshiba TC58CVG0S3HRAIG 1Gbit (128 MB) SPI NAND Flash Bellek Haritası
+ * Kaynak: Jason Reilly VK7ZJA (878techmods.html - #FlashMem)
  * ============================================================ */
+#define NAND_ADDR_FONTS_START       0x00000000U /* Alternatif dil fontları (0x00000000 - 0x0014FFFF) */
+#define NAND_ADDR_BOOT_PICTURE      0x00150000U /* Varsayılan açılış logosu (0x00150000 - 0x00159FFF) */
+#define NAND_ADDR_ICONS_START       0x0015A000U /* Çok renkli ikon bitmapleri (0x0015A000 - 0x001FFFFF) */
+#define NAND_ADDR_ICONS_EXT         0x00420000U /* Ek ikon bitmapleri (0x00420000 - 0x0043BFFF) */
+#define NAND_ADDR_CODEPLUG_START    0x00800000U /* Orijinal CPS Codeplug alanı (0x00800000 - 0x02EFFFFF) */
+#define NAND_ADDR_RF_ALIGN_START    0x02F00000U /* Aktif RF 'soft' kalibrasyon verisi (0x02F00000 - 0x02F8061F) */
+#define NAND_ADDR_LOCAL_INFO        0x02FA0000U /* Yerel telsiz konfigürasyon bloğu (0x02FA0000 - 0x02FDFFFF) */
+#define NAND_ADDR_CUSTOM_BOOT_PIC   0x042C0000U /* Özel kullanıcı açılış resmi (0x042C0000 - 0x042C9FFF) */
+#define NAND_ADDR_BACKGROUND_PIC    0x04300000U /* Özel arka plan resmi (0x04300000 - 0x04309FFF) */
+#define NAND_ADDR_DMR_ID_DATABASE   0x04500000U /* DMR ID dijital kişi veritabanı (0x04500000 - 0x06BFFFFF) */
+#define NAND_ADDR_DMR_RECORDINGS    0x06D00000U /* DMR ses kayıtları (0x06D00000 - 0x07FFFFFF) */
 
+/* Open Firmware Dahili Codeplug Adresleri */
 #define FLASH_ADDR_HEADER          0x000000U  /* 4 KB Başlık & Tanımlayıcı */
 #define FLASH_ADDR_SETTINGS        0x001000U  /* 4 KB Genel Telsiz Ayarları */
 #define FLASH_ADDR_ZONES           0x004000U  /* 32 KB Bölge (Zone) Tablosu */
