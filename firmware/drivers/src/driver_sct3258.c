@@ -27,18 +27,23 @@
 #include "driver_sct3258.h"
 #include "hal_gpio.h"
 #include "hal_systick.h"
+#include "sct3258_boot_blob.h"
 #include <string.h>
 
 /* ============================================================
- * Pin Tanımları
+ * Pin Tanımları (RadioFoundry Doğrulanmış Harita)
  * ============================================================ */
 
 /* Kontrol pinleri */
-#define PIN_SCT_RST       ((hal_gpio_id_t){GPIO_PORT_E, 0})
-#define PIN_HPI_CTRL      ((hal_gpio_id_t){GPIO_PORT_E, 1})
-#define PIN_HPI_ALE       ((hal_gpio_id_t){GPIO_PORT_E, 2})
-#define PIN_HPI_CS        ((hal_gpio_id_t){GPIO_PORT_E, 3})
-#define PIN_HPI_INT       ((hal_gpio_id_t){GPIO_PORT_E, 4})
+#define PIN_HPI_HCSN       PIN_SCT_HCSN       /* PD2, Active LOW */
+#define PIN_HPI_HWRN       PIN_SCT_HWRN       /* PD3, Active LOW */
+#define PIN_HPI_HRDN       PIN_SCT_HRDN       /* PD4, Active LOW */
+#define PIN_HPI_HOBIB      PIN_SCT_HOBIB      /* PD5, Input, LOW=data ready */
+#define PIN_HPI_RSTN       PIN_SCT_RSTN       /* PD6, Reset Active LOW */
+#define PIN_HPI_STRAP      PIN_SCT_PIO1_STRAP /* PC12, Intel mode LOW */
+#define PIN_HPI_EN1        PIN_SCT_PWR_EN1    /* PA8, HIGH */
+#define PIN_HPI_EN2        PIN_SCT_PWR_EN2    /* PC6, HIGH */
+#define PIN_HPI_SLOT       PIN_SCT_TDMA_SLOT  /* PD0, TDMA slot timing EXTI */
 
 /* Veri bus pinleri (PD8-PD15) */
 static const hal_gpio_id_t HPI_DATA_PINS[8] = {
@@ -49,10 +54,10 @@ static const hal_gpio_id_t HPI_DATA_PINS[8] = {
 };
 
 /* ============================================================
- * HPI Register Adresleri (kısmen doğrulanmış)
+ * HPI Register Adresleri & Paket Başlığı
  * ============================================================ */
 
-#define HPI_REG_CHIP_ID       0x0000  /* Çip kimlik (salt okunur) */
+#define HPI_REG_CHIP_ID       0x0000  /* Çip kimlik */
 #define HPI_REG_CONTROL       0x0001  /* Ana kontrol register */
 #define HPI_REG_STATUS        0x0002  /* Durum register */
 #define HPI_REG_MODE          0x0003  /* Çalışma modu */
@@ -84,18 +89,21 @@ static const hal_gpio_id_t HPI_DATA_PINS[8] = {
 #define STATUS_BIT_TX_ACTIVE  (1U << 4)
 #define STATUS_BIT_RX_ACTIVE  (1U << 5)
 
+/* SCT3258 Paket Başlığı: 0x84, 0xA9, 0x61 */
+static const uint8_t SCT_PACKET_HEADER[3] __attribute__((unused)) = {0x84, 0xA9, 0x61};
+
 /* ============================================================
  * Statik Değişkenler
  * ============================================================ */
 
 static sct3258_status_t s_status;
 static bool s_initialized = false;
+static bool s_boot_loaded = false;
 
 /* ============================================================
- * HPI Bus İşlemleri
+ * HPI Bus İşlemleri (Intel Timing)
  * ============================================================ */
 
-/** Veri bus'ını çıkış moduna ayarla */
 static void hpi_data_bus_output(void)
 {
     for (int i = 0; i < 8; i++) {
@@ -103,7 +111,6 @@ static void hpi_data_bus_output(void)
     }
 }
 
-/** Veri bus'ını giriş moduna ayarla */
 static void hpi_data_bus_input(void)
 {
     for (int i = 0; i < 8; i++) {
@@ -111,7 +118,6 @@ static void hpi_data_bus_input(void)
     }
 }
 
-/** 8-bit veriyi bus'a yaz */
 static void hpi_data_bus_write(uint8_t value)
 {
     for (int i = 0; i < 8; i++) {
@@ -119,7 +125,6 @@ static void hpi_data_bus_write(uint8_t value)
     }
 }
 
-/** 8-bit veriyi bus'tan oku */
 static uint8_t hpi_data_bus_read(void)
 {
     uint8_t value = 0;
@@ -131,7 +136,6 @@ static uint8_t hpi_data_bus_read(void)
     return value;
 }
 
-/** Kısa gecikme (bus timing) */
 static inline void hpi_delay(void)
 {
     for (volatile int i = 0; i < 20; i++) {
@@ -139,45 +143,54 @@ static inline void hpi_delay(void)
     }
 }
 
+/* HOBIB (FIFO meşgul değil) bekle */
+static inline void hpi_wait_ready(void)
+{
+    uint32_t timeout = 5000;
+    while (!hal_gpio_read(PIN_HPI_HOBIB) && --timeout) {
+        hpi_delay();
+    }
+}
+
 /**
- * @brief HPI register'a 16-bit değer yaz
- *
- * HPI Yazma Protokolü (tahmini):
- *   1. CS LOW
- *   2. ALE HIGH → Adres bus'a yaz → ALE LOW (adres kilitle)
- *   3. CTRL = WRITE
- *   4. Veri bus'a yaz (önce yüksek byte, sonra düşük byte)
- *   5. CS HIGH
+ * @brief HPI register'a 16-bit değer yaz (Intel mode: CS LOW -> WR strobe)
  */
 int sct3258_hpi_write(uint16_t addr, uint16_t value)
 {
     if (!s_initialized) return -1;
 
+    hpi_wait_ready();
     hpi_data_bus_output();
 
-    /* Adres fazı */
-    hal_gpio_clear(PIN_HPI_CS);       /* CS LOW */
-    hal_gpio_set(PIN_HPI_ALE);        /* ALE HIGH */
-    hal_gpio_clear(PIN_HPI_CTRL);     /* CTRL = WRITE */
+    hal_gpio_clear(PIN_HPI_HCSN);     /* CS LOW */
 
-    /* Adres yüksek byte */
+    /* Adres baytları */
     hpi_data_bus_write((uint8_t)(addr >> 8));
+    hal_gpio_clear(PIN_HPI_HWRN);
     hpi_delay();
-    /* Adres düşük byte */
+    hal_gpio_set(PIN_HPI_HWRN);
+    hpi_delay();
+
     hpi_data_bus_write((uint8_t)(addr & 0xFF));
+    hal_gpio_clear(PIN_HPI_HWRN);
+    hpi_delay();
+    hal_gpio_set(PIN_HPI_HWRN);
     hpi_delay();
 
-    hal_gpio_clear(PIN_HPI_ALE);      /* ALE LOW (adres kilitlendi) */
+    /* Veri baytları */
+    hpi_data_bus_write((uint8_t)(value >> 8));
+    hal_gpio_clear(PIN_HPI_HWRN);
+    hpi_delay();
+    hal_gpio_set(PIN_HPI_HWRN);
     hpi_delay();
 
-    /* Veri fazı */
-    hpi_data_bus_write((uint8_t)(value >> 8));    /* Yüksek byte */
+    hpi_data_bus_write((uint8_t)(value & 0xFF));
+    hal_gpio_clear(PIN_HPI_HWRN);
     hpi_delay();
-    hpi_data_bus_write((uint8_t)(value & 0xFF));  /* Düşük byte */
+    hal_gpio_set(PIN_HPI_HWRN);
     hpi_delay();
 
-    hal_gpio_set(PIN_HPI_CS);         /* CS HIGH */
-
+    hal_gpio_set(PIN_HPI_HCSN);       /* CS HIGH */
     return 0;
 }
 
@@ -188,31 +201,40 @@ int sct3258_hpi_read(uint16_t addr)
 {
     if (!s_initialized) return -1;
 
-    /* Adres fazı (çıkış) */
+    hpi_wait_ready();
     hpi_data_bus_output();
 
-    hal_gpio_clear(PIN_HPI_CS);
-    hal_gpio_set(PIN_HPI_ALE);
-    hal_gpio_set(PIN_HPI_CTRL);       /* CTRL = READ */
+    hal_gpio_clear(PIN_HPI_HCSN);
 
+    /* Adres baytları yaz */
     hpi_data_bus_write((uint8_t)(addr >> 8));
+    hal_gpio_clear(PIN_HPI_HWRN);
     hpi_delay();
+    hal_gpio_set(PIN_HPI_HWRN);
+    hpi_delay();
+
     hpi_data_bus_write((uint8_t)(addr & 0xFF));
+    hal_gpio_clear(PIN_HPI_HWRN);
+    hpi_delay();
+    hal_gpio_set(PIN_HPI_HWRN);
     hpi_delay();
 
-    hal_gpio_clear(PIN_HPI_ALE);
-    hpi_delay();
-
-    /* Veri fazı (giriş) */
+    /* Veri baytları oku */
     hpi_data_bus_input();
+
+    hal_gpio_clear(PIN_HPI_HRDN);
+    hpi_delay();
+    uint8_t hi = hpi_data_bus_read();
+    hal_gpio_set(PIN_HPI_HRDN);
     hpi_delay();
 
-    uint8_t hi = hpi_data_bus_read();
+    hal_gpio_clear(PIN_HPI_HRDN);
     hpi_delay();
     uint8_t lo = hpi_data_bus_read();
+    hal_gpio_set(PIN_HPI_HRDN);
+    hpi_delay();
 
-    hal_gpio_set(PIN_HPI_CS);
-
+    hal_gpio_set(PIN_HPI_HCSN);
     return (int)((uint16_t)(hi << 8) | lo);
 }
 
@@ -224,33 +246,66 @@ int sct3258_init(void)
 {
     memset(&s_status, 0, sizeof(s_status));
 
-    /* Kontrol pinlerini yapılandır */
-    hal_gpio_configure(PIN_SCT_RST,  GPIO_MODE_OUTPUT_PP, GPIO_SPEED_50MHZ);
-    hal_gpio_configure(PIN_HPI_CTRL, GPIO_MODE_OUTPUT_PP, GPIO_SPEED_50MHZ);
-    hal_gpio_configure(PIN_HPI_ALE,  GPIO_MODE_OUTPUT_PP, GPIO_SPEED_50MHZ);
-    hal_gpio_configure(PIN_HPI_CS,   GPIO_MODE_OUTPUT_PP, GPIO_SPEED_50MHZ);
-    hal_gpio_configure(PIN_HPI_INT,  GPIO_MODE_INPUT_PULLUP, GPIO_SPEED_50MHZ);
+    /* Güç ve kontrol pinlerini yapılandır */
+    hal_gpio_configure(PIN_HPI_EN1, GPIO_MODE_OUTPUT_PP, GPIO_SPEED_50MHZ);
+    hal_gpio_configure(PIN_HPI_EN2, GPIO_MODE_OUTPUT_PP, GPIO_SPEED_50MHZ);
+    hal_gpio_configure(PIN_HPI_STRAP, GPIO_MODE_OUTPUT_PP, GPIO_SPEED_50MHZ);
+    hal_gpio_configure(PIN_HPI_RSTN, GPIO_MODE_OUTPUT_PP, GPIO_SPEED_50MHZ);
+    hal_gpio_configure(PIN_HPI_HCSN, GPIO_MODE_OUTPUT_PP, GPIO_SPEED_50MHZ);
+    hal_gpio_configure(PIN_HPI_HWRN, GPIO_MODE_OUTPUT_PP, GPIO_SPEED_50MHZ);
+    hal_gpio_configure(PIN_HPI_HRDN, GPIO_MODE_OUTPUT_PP, GPIO_SPEED_50MHZ);
+    hal_gpio_configure(PIN_HPI_HOBIB, GPIO_MODE_INPUT_PULLUP, GPIO_SPEED_50MHZ);
+    hal_gpio_configure(PIN_HPI_SLOT, GPIO_MODE_INPUT_FLOATING, GPIO_SPEED_50MHZ);
 
     /* Başlangıç durumları */
-    hal_gpio_set(PIN_HPI_CS);       /* CS HIGH (deselect) */
-    hal_gpio_clear(PIN_HPI_ALE);    /* ALE LOW */
+    hal_gpio_set(PIN_HPI_HCSN);
+    hal_gpio_set(PIN_HPI_HWRN);
+    hal_gpio_set(PIN_HPI_HRDN);
 
-    /* Reset dizisi: RST LOW → 10ms bekle → RST HIGH → 50ms bekle */
-    hal_gpio_clear(PIN_SCT_RST);    /* Reset aktif */
-    hal_delay_ms(10);
-    hal_gpio_set(PIN_SCT_RST);      /* Reset bırak */
-    hal_delay_ms(50);               /* Boot bekle */
+    /* RadioFoundry Doğrulanmış Reset Sırası:
+     * 1. PA8 ve PC6 HIGH (SCT3258 Güç Besleme)
+     * 2. PC12 (PIO1 strap) LOW (Intel HPI Mode)
+     * 3. RSTN 100ms HIGH, 500ms LOW, ardından HIGH
+     * 4. PC12 pull-down input olarak serbest bırakılır
+     */
+    hal_gpio_set(PIN_HPI_EN1);
+    hal_gpio_set(PIN_HPI_EN2);
+    hal_gpio_clear(PIN_HPI_STRAP); /* Intel mode */
+
+    hal_gpio_set(PIN_HPI_RSTN);
+    hal_delay_ms(100);
+    hal_gpio_clear(PIN_HPI_RSTN);
+    hal_delay_ms(500);
+    hal_gpio_set(PIN_HPI_RSTN);
+    hal_delay_ms(50);
+
+    hal_gpio_configure(PIN_HPI_STRAP, GPIO_MODE_INPUT_PULLDOWN, GPIO_SPEED_50MHZ);
 
     s_initialized = true;
 
-    /* Çip hazır mı kontrol et */
-    if (!sct3258_is_alive()) {
-        s_initialized = false;
-        return -1;
+    /* 1024 16-bit word bootloader bloğunu HPI üzerinden yükle */
+    hpi_data_bus_output();
+    hal_gpio_clear(PIN_HPI_HCSN);
+    for (size_t i = 0; i < sizeof(SCT3258_BOOT_BLOB); i += 2) {
+        hpi_data_bus_write(SCT3258_BOOT_BLOB[i]);
+        hal_gpio_clear(PIN_HPI_HWRN);
+        hpi_delay();
+        hal_gpio_set(PIN_HPI_HWRN);
+        hpi_delay();
+
+        hpi_data_bus_write(SCT3258_BOOT_BLOB[i + 1]);
+        hal_gpio_clear(PIN_HPI_HWRN);
+        hpi_delay();
+        hal_gpio_set(PIN_HPI_HWRN);
+        hpi_delay();
     }
+    hal_gpio_set(PIN_HPI_HCSN);
+    s_boot_loaded = true;
+
+    hal_delay_ms(50);
 
     /* Varsayılan yapılandırma */
-    sct3258_hpi_write(HPI_REG_INT_ENABLE, 0x003F);  /* Tüm interrupt'ları etkinleştir */
+    sct3258_hpi_write(HPI_REG_INT_ENABLE, 0x003F);
     sct3258_hpi_write(HPI_REG_CONTROL, CTRL_BIT_ENABLE);
 
     return 0;

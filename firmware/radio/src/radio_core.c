@@ -11,6 +11,7 @@
 #include "driver_tones.h"
 #include "driver_sct3258.h"
 #include "driver_linkboard.h"
+#include "calibration.h"
 #include "codeplug_storage.h"
 #include "dmr_protocol.h"
 #include "scanner.h"
@@ -78,6 +79,7 @@ int radio_core_init(void)
     s_radio.battery_percent = hal_adc_get_battery_percentage();
 
     if (codeplug_init() != 0) return -1;
+    calibration_init();
     dmr_protocol_init();
     scanner_init();
 
@@ -310,6 +312,9 @@ int radio_core_start_tx(void)
         }
     }
 
+    /* RF Güç Kalibrasyonunu PA4 (DAC0) üzerinden uygula */
+    calibration_apply_tx_power(ch->tx_freq_hz, ch->power);
+
     if (at1846s_tx_on() != 0) {
         if (ch->mode == CH_MODE_DMR) {
             sct3258_dmr_tx_stop();
@@ -354,6 +359,7 @@ int radio_core_stop_tx(void)
     }
 
     int tx_off_rc = at1846s_tx_off();
+    calibration_apply_tx_power(ch->rx_freq_hz, POWER_LOW); /* PA bias kapat */
     int mic_off_rc = audio_codec_set_path(AUDIO_PATH_MIC_INTERNAL, false);
     if (tx_off_rc != 0 || mic_off_rc != 0 || dmr_stop_rc != 0 ||
         at1846s_set_frequency(ch->rx_freq_hz) != 0 ||

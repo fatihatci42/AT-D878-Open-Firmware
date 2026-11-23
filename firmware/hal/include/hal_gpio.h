@@ -73,39 +73,72 @@ typedef enum {
 } hal_gpio_speed_t;
 
 /* ============================================================
- * Doğrulanmış Pin Atamaları (Kart: D878UV2A-BORD, FW: V4.00)
- * Kaynak: Orijinal binary 0x08020D14 - 0x08020EBC dökümü
+ * Doğrulanmış Pin Atamaları (AnyTone AT-D868 / D878 / D878UVII)
+ * Kaynak: RadioFoundry Hardware Spec & D878 Teardown Analizleri
  * ============================================================ */
 
 /* PTT butonu - Active LOW (Dahili Pull-Up) */
 #define PIN_PTT              ((hal_gpio_id_t){GPIO_PORT_A, 0})
 
-/* Ses Amplifikatörü / Mute (1 = Ses Açık, 0 = Mute) */
+/* Ses Amplifikatörü / Mute (HM8872: 1 = Ses Açık, 0 = Mute) */
 #define PIN_AUDIO_MUTE       ((hal_gpio_id_t){GPIO_PORT_A, 7})
+#define PIN_AUDIO_SWITCH     ((hal_gpio_id_t){GPIO_PORT_E, 0})
 
 /* Hata/Durum LED & Güç Kontrol */
 #define PIN_LED_PWR          ((hal_gpio_id_t){GPIO_PORT_A, 1})
 
-/* 1.77" Renkli TFT LCD Kontrol Pinleri */
-#define PIN_LCD_RST          ((hal_gpio_id_t){GPIO_PORT_C, 3})  /* Reset - Aktif HIGH */
-#define PIN_LCD_DC           ((hal_gpio_id_t){GPIO_PORT_C, 4})  /* Data/Command (A0) */
-#define PIN_LCD_CS           ((hal_gpio_id_t){GPIO_PORT_C, 5})  /* Chip Select - Aktif LOW */
-#define PIN_LCD_BL           ((hal_gpio_id_t){GPIO_PORT_C, 10}) /* Arka Aydınlatma PWM/ON */
+/* DAC0 12-bit TX Güç Seviyesi (Fabrika NAND kalibrasyon tablosundan beslenir) */
+#define PIN_TX_POWER_DAC     ((hal_gpio_id_t){GPIO_PORT_A, 4})
 
-/* RF Transceiver (AT1846S) Kontrol Hatları */
-#define PIN_RF_CS            ((hal_gpio_id_t){GPIO_PORT_B, 1})  /* Chip Select */
-#define PIN_RF_CLK           ((hal_gpio_id_t){GPIO_PORT_B, 2})  /* Seri Saat / Veri */
+/* 1.77" Renkli TFT LCD (ST7735S 8080 8-Bit Paralel Bus) */
+#define PIN_LCD_RS_DC        ((hal_gpio_id_t){GPIO_PORT_B, 10}) /* Low=Komut, High=Veri */
+#define PIN_LCD_DC           PIN_LCD_RS_DC
+#define PIN_LCD_RST          ((hal_gpio_id_t){GPIO_PORT_B, 11}) /* Reset - Aktif LOW */
+#define PIN_LCD_CS           ((hal_gpio_id_t){GPIO_PORT_B, 12}) /* Chip Select - Aktif LOW */
+#define PIN_LCD_WR           ((hal_gpio_id_t){GPIO_PORT_B, 13}) /* Write Strobe - Aktif LOW */
+#define PIN_LCD_RD           ((hal_gpio_id_t){GPIO_PORT_E, 15}) /* Read Strobe - Genelde HIGH */
+#define PIN_LCD_BL           ((hal_gpio_id_t){GPIO_PORT_A, 6})  /* Arka Aydınlatma PWM (TIMER2_CH0) */
 
-/* RF Güç ve Bant Seçici Switch */
-#define PIN_RF_BAND_SWITCH   ((hal_gpio_id_t){GPIO_PORT_E, 6})  /* 1=UHF (400-520MHz), 0=VHF (134-174MHz) */
-#define PIN_RF_PA_BIAS       ((hal_gpio_id_t){GPIO_PORT_E, 7})  /* PA Bias / TX Enable */
+/* RF Transceiver (AT1846S / QA4818N) 3-Wire Bus */
+#define PIN_RF_SCLK          ((hal_gpio_id_t){GPIO_PORT_B, 3})  /* 3-Wire Saat */
+#define PIN_RF_SDIO          ((hal_gpio_id_t){GPIO_PORT_B, 4})  /* 3-Wire Çift Yönlü Veri */
+#define PIN_RF_SEN           ((hal_gpio_id_t){GPIO_PORT_B, 5})  /* 3-Wire Chip Enable - Aktif LOW */
+#define PIN_RF_CS            PIN_RF_SEN
+#define PIN_RF_CLK           PIN_RF_SCLK
+
+/* I2C Bus (RDA5802N FM Alıcı [0x10] & MMA8653FC Akselerometre [0x1D]) */
+#define PIN_I2C_SCL          ((hal_gpio_id_t){GPIO_PORT_B, 6})
+#define PIN_I2C_SDA          ((hal_gpio_id_t){GPIO_PORT_B, 7})
+
+/* SPI NAND Flash (Toshiba TC58CVG0S3HRAIG / GigaDevice) */
+#define PIN_NAND_CS          ((hal_gpio_id_t){GPIO_PORT_B, 8})
+#define PIN_NAND_CLK         ((hal_gpio_id_t){GPIO_PORT_B, 14})
+#define PIN_NAND_MOSI        ((hal_gpio_id_t){GPIO_PORT_B, 15})
+#define PIN_NAND_MISO        ((hal_gpio_id_t){GPIO_PORT_A, 15}) /* Dual Output Okuma */
+
+/* Döner Kanal Enkoderi (Quadrature Gray Code) */
+#define PIN_ENC_A            ((hal_gpio_id_t){GPIO_PORT_C, 8})
+#define PIN_ENC_B            ((hal_gpio_id_t){GPIO_PORT_C, 9})
+
+/* Dahili ADC Girişleri */
+#define PIN_ADC_BATT         ((hal_gpio_id_t){GPIO_PORT_C, 0})  /* ADC0_CH10 - Batarya gerilim bölücü */
+#define PIN_ADC_RF_SENSE     ((hal_gpio_id_t){GPIO_PORT_C, 1})  /* ADC0_CH11 - RF güç detektörü */
 
 /* Çevre Birim Güç Kontrolü (Bluetooth / GPS) */
 #define PIN_PERIPH_PWR       ((hal_gpio_id_t){GPIO_PORT_E, 9})  /* 1 = GPS & BT Aktif */
 
-/* DMR Baseband (SCT3258) Kontrol */
-#define PIN_SCT_RST          ((hal_gpio_id_t){GPIO_PORT_E, 0})  /* 1 = Aktif, 0 = Reset */
-#define PIN_SCT_HPI_CTRL     ((hal_gpio_id_t){GPIO_PORT_E, 1})  /* HPI Kontrol Hattı */
+/* DMR Baseband (SCT3258) Doğrulanmış HPI Kontrol Hatları */
+#define PIN_SCT_PWR_EN1      ((hal_gpio_id_t){GPIO_PORT_A, 8})  /* Güç Enable 1 (HIGH) */
+#define PIN_SCT_PWR_EN2      ((hal_gpio_id_t){GPIO_PORT_C, 6})  /* Güç Enable 2 (HIGH) */
+#define PIN_SCT_PIO1_STRAP   ((hal_gpio_id_t){GPIO_PORT_C, 12}) /* Intel Mode Seçici (Reset'te LOW) */
+#define PIN_SCT_HCSN         ((hal_gpio_id_t){GPIO_PORT_D, 2})  /* HPI Chip Select - Aktif LOW */
+#define PIN_SCT_HWRN         ((hal_gpio_id_t){GPIO_PORT_D, 3})  /* HPI Write - Aktif LOW */
+#define PIN_SCT_HRDN         ((hal_gpio_id_t){GPIO_PORT_D, 4})  /* HPI Read - Aktif LOW */
+#define PIN_SCT_HOBIB        ((hal_gpio_id_t){GPIO_PORT_D, 5})  /* HPI FIFO Data Waiting (Giriş) */
+#define PIN_SCT_RSTN         ((hal_gpio_id_t){GPIO_PORT_D, 6})  /* Reset - Aktif LOW */
+#define PIN_SCT_TDMA_SLOT    ((hal_gpio_id_t){GPIO_PORT_D, 0})  /* PIO3 60ms TDMA Slot Sinyali (Kesme Girişi) */
+#define PIN_SCT_RST          PIN_SCT_RSTN
+#define PIN_SCT_HPI_CTRL     PIN_SCT_HWRN
 
 /* ============================================================
  * API Fonksiyonları
