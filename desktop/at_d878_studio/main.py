@@ -31,7 +31,34 @@ if _current_dir not in sys.path:
 
 from comm.flasher import AnyToneFlasher
 from comm.firmware_emulator import FirmwareEmulator, FirmwareReport
+from comm.webcps import (
+    WebCPSPackage,
+    parse_webcps_zip,
+    fetch_webcps_project,
+    load_turkey_template,
+    export_webcps_zip,
+)
 from gui.theme import MODERN_STYLE
+
+# -----------------------------------------------------------------------------
+# WEBCPS FETCH THREAD
+# -----------------------------------------------------------------------------
+class WebCPSFetchThread(QThread):
+    progress_signal = Signal(str)
+    finished_signal = Signal(bool, object, str)
+
+    def __init__(self, target_url_or_uuid):
+        super().__init__()
+        self.target = target_url_or_uuid
+
+    def run(self):
+        try:
+            self.progress_signal.emit("WebCPS API bağlantısı kuruluyor...")
+            pkg = fetch_webcps_project(self.target)
+            self.finished_signal.emit(True, pkg, "")
+        except Exception as exc:
+            self.finished_signal.emit(False, None, str(exc))
+
 
 # -----------------------------------------------------------------------------
 # FLASHER THREAD
@@ -907,6 +934,7 @@ class ATD878Studio(QMainWindow):
         self.handshake_thread = None
         self.flash_thread = None
         self.analysis_thread = None
+        self.webcps_thread = None
         self.project_root = self._find_project_root()
         self.release_dir = os.path.join(self.project_root, "tools", "firmware_analyzer", "D878UVII PLUS V4.00 official release 250815")
         
@@ -917,6 +945,7 @@ class ATD878Studio(QMainWindow):
         self.autosave_timer.setInterval(700)
         self.autosave_timer.timeout.connect(self._persist_workspace)
         self.table_channels.itemChanged.connect(self._schedule_workspace_save)
+        self.table_zones.itemChanged.connect(self._schedule_workspace_save)
         self.table_contacts.itemChanged.connect(self._schedule_workspace_save)
         self.port_combo.currentIndexChanged.connect(self._save_last_port)
         self.persistent_controls = self._persistent_control_items()
@@ -938,6 +967,8 @@ class ATD878Studio(QMainWindow):
             self.load_empty_channels()
         if not self._restore_table("data/contacts", self.table_contacts):
             self.load_sample_contacts()
+        if not self._restore_table("data/zones", self.table_zones):
+            self.load_default_zones()
 
     @staticmethod
     def _find_project_root():
@@ -1052,7 +1083,7 @@ class ATD878Studio(QMainWindow):
             self.autosave_timer.start()
 
     def _persist_workspace(self):
-        for key, table in (("data/channels", self.table_channels), ("data/contacts", self.table_contacts)):
+        for key, table in (("data/channels", self.table_channels), ("data/contacts", self.table_contacts), ("data/zones", self.table_zones)):
             rows = []
             for row_index in range(table.rowCount()):
                 rows.append([
@@ -1077,7 +1108,7 @@ class ATD878Studio(QMainWindow):
             self.statusBar().showMessage(f"Çalışma verileri kaydedilemedi: {exc}", 10000)
 
     def closeEvent(self, event):
-        active_threads = [thread for thread in (self.handshake_thread, self.flash_thread, self.analysis_thread) if thread and thread.isRunning()]
+        active_threads = [thread for thread in (self.handshake_thread, self.flash_thread, self.analysis_thread, self.webcps_thread) if thread and thread.isRunning()]
         if active_threads:
             reply = QMessageBox.question(
                 self,
@@ -1177,7 +1208,9 @@ class ATD878Studio(QMainWindow):
 
         self.btn_nav_dash = QPushButton("📊 Cihaz Paneli")
         self.btn_nav_chan = QPushButton("📻 Kanallar & VFO")
-        self.btn_nav_cont = QPushButton("👥 DMR Kişiler")
+        self.btn_nav_zone = QPushButton("🗺️ Bölgeler & Zone")
+        self.btn_nav_cont = QPushButton("👥 DMR Kişiler & TG")
+        self.btn_nav_webcps = QPushButton("🌐 WebCPS & TR Röleleri")
         self.btn_nav_aprs = QPushButton("📡 APRS & GPS Dolaşım")
         self.btn_nav_keys = QPushButton("🎛️ Cihaz Ayarları & Tuşlar")
         self.btn_nav_sim  = QPushButton("📺 Telsiz LCD Simülatörü")
@@ -1186,9 +1219,10 @@ class ATD878Studio(QMainWindow):
         self.btn_nav_docs = QPushButton("📖 Donanım Belgeleri")
 
         self.nav_buttons = [
-            self.btn_nav_dash, self.btn_nav_chan, self.btn_nav_cont,
-            self.btn_nav_aprs, self.btn_nav_keys, self.btn_nav_sim,
-            self.btn_nav_boot, self.btn_nav_flash, self.btn_nav_docs
+            self.btn_nav_dash, self.btn_nav_chan, self.btn_nav_zone,
+            self.btn_nav_cont, self.btn_nav_webcps, self.btn_nav_aprs,
+            self.btn_nav_keys, self.btn_nav_sim, self.btn_nav_boot,
+            self.btn_nav_flash, self.btn_nav_docs
         ]
 
         for i, btn in enumerate(self.nav_buttons):
@@ -1211,13 +1245,15 @@ class ATD878Studio(QMainWindow):
 
         self.pages.addWidget(self.create_dashboard_page())    # 0
         self.pages.addWidget(self.create_channels_page())     # 1
-        self.pages.addWidget(self.create_contacts_page())     # 2
-        self.pages.addWidget(self.create_aprs_page())         # 3
-        self.pages.addWidget(self.create_keys_page())         # 4
-        self.pages.addWidget(self.create_simulator_page())    # 5
-        self.pages.addWidget(self.create_boot_screen_page())  # 6
-        self.pages.addWidget(self.create_flasher_page())      # 7
-        self.pages.addWidget(self.create_docs_page())         # 8
+        self.pages.addWidget(self.create_zones_page())        # 2
+        self.pages.addWidget(self.create_contacts_page())     # 3
+        self.pages.addWidget(self.create_webcps_page())       # 4
+        self.pages.addWidget(self.create_aprs_page())         # 5
+        self.pages.addWidget(self.create_keys_page())         # 6
+        self.pages.addWidget(self.create_simulator_page())    # 7
+        self.pages.addWidget(self.create_boot_screen_page())  # 8
+        self.pages.addWidget(self.create_flasher_page())      # 9
+        self.pages.addWidget(self.create_docs_page())         # 10
 
         body_layout.addWidget(self.pages)
         root_layout.addWidget(body)
@@ -1290,13 +1326,27 @@ class ATD878Studio(QMainWindow):
             "• <b>DMR baseband:</b> Sicomm/CML SCT3258TD (proje notlarında belirtilen) [PE0–PE7]",
             "• <b>Ekran profili:</b> 1.77 inç TFT, 160×128 (proje notlarında belirtilen)",
             "• <b>Alt kart:</b> LinkBoard BHT V2.00 (proje notlarında belirtilen)",
-            "• <b>Ses profili:</b> TLV320AIC3204 (proje notlarında belirtilen)"
+            "• <b>Ses profili:</b> TLV320AIC3204 (proje notlarında belirtilen)",
+            "• <b>FM Yayın Alıcısı:</b> RDA Micro RDA5802N (65–108 MHz)",
+            "• <b>WebCPS Desteği:</b> TA1UAT / TA5THK 239 Kanal, 8 Zone, 108 TG resmi kodplug entegrasyonu hazır"
         ]
         for s in specs:
             lbl = QLabel(s)
             lbl.setStyleSheet("font-size: 12px; padding: 2px 0;")
             specs_layout.addWidget(lbl)
         layout.addWidget(group_specs)
+
+        # Hızlı Kodplug Eylemleri
+        quick_bar = QHBoxLayout()
+        btn_quick_tr = QPushButton("🇹🇷 Türkiye Röle Kodplug'unu Yükle (239 Kanal, 8 Zone, 108 TG)")
+        btn_quick_tr.setStyleSheet("background-color: #065F46; color: #ECFDF5; font-weight: 700; padding: 10px; border-radius: 6px;")
+        btn_quick_tr.clicked.connect(self.load_turkey_codeplug)
+        btn_quick_webcps = QPushButton("🌐 WebCPS & Kodplug Sayfasını Aç")
+        btn_quick_webcps.clicked.connect(lambda: self.switch_page(4))
+        quick_bar.addWidget(btn_quick_tr)
+        quick_bar.addWidget(btn_quick_webcps)
+        layout.addLayout(quick_bar)
+
         layout.addStretch()
         return page
 
@@ -1395,7 +1445,7 @@ class ATD878Studio(QMainWindow):
             "kanaladı": 1, "channelname": 1, "channel": 1, "kanal": 1, "name": 1,
             "rxfrekansımhz": 2, "rxfrekansı": 2, "rxfreq": 2, "rxfrequency": 2, "receivefrequency": 2,
             "txfrekansımhz": 3, "txfrekansı": 3, "txfreq": 3, "txfrequency": 3, "transmitfrequency": 3,
-            "mod": 4, "mode": 4, "modulation": 4,
+            "mod": 4, "mode": 4, "modulation": 4, "channeltype": 4, "type": 4,
             "güçseviyesi": 5, "power": 5, "powerlevel": 5,
             "bantgenişliği": 6, "bandwidth": 6,
             "tonrenkkodutg": 7, "tone": 7, "colorcodetg": 7, "colorcode": 7,
@@ -1433,9 +1483,9 @@ class ATD878Studio(QMainWindow):
                     row = [values[i].strip() if i < len(values) else "" for i in range(8)]
                 row[0] = row[0] or str(len(imported) + 1)
                 row[4] = row[4].upper() or "FM"
-                if row[4] in ("ANALOG", "ANALOGUE"):
+                if row[4] in ("ANALOG", "ANALOGUE", "A-ANALOG", "A"):
                     row[4] = "FM"
-                elif row[4] == "DIGITAL":
+                elif row[4] in ("DIGITAL", "D-DIGITAL", "D"):
                     row[4] = "DMR"
                 try:
                     rx, tx = float(row[2].replace(",", ".")), float(row[3].replace(",", "."))
@@ -1479,7 +1529,67 @@ class ATD878Studio(QMainWindow):
             QMessageBox.critical(self, "Hata", f"CSV yazma hatası: {e}")
 
     # -------------------------------------------------------------
-    # SAYFA 2: DMR DİJİTAL KİŞİLER (RADIOID DATABASE)
+    # SAYFA 2: BÖLGELER & ZONE LİSTESİ
+    # -------------------------------------------------------------
+    def create_zones_page(self):
+        page = QWidget()
+        layout = QVBoxLayout(page)
+
+        top_bar = QHBoxLayout()
+        self.zone_search = QLineEdit()
+        self.zone_search.setPlaceholderText("🔍 Zone adı veya kanal ara...")
+        self.zone_search.setMaximumWidth(260)
+        self.zone_search.textChanged.connect(self.filter_zones)
+        top_bar.addWidget(self.zone_search)
+        top_bar.addStretch()
+
+        btn_add = QPushButton("+ Yeni Zone Ekle")
+        btn_add.clicked.connect(self.add_zone_row)
+        top_bar.addWidget(btn_add)
+
+        btn_remove = QPushButton("Seçileni Sil")
+        btn_remove.clicked.connect(lambda: self.delete_selected_rows(self.table_zones, "zone"))
+        top_bar.addWidget(btn_remove)
+
+        layout.addLayout(top_bar)
+        layout.addWidget(QLabel("Bölgeler ve Zone Listesi (VHF/UHF Röleler, Simplex grupları, DMR ve İl grupları)"))
+
+        self.table_zones = QTableWidget(0, 5)
+        self.table_zones.setHorizontalHeaderLabels([
+            "No", "Zone Adı", "Kanal Sayısı", "Varsayılan Kanal A", "Varsayılan Kanal B"
+        ])
+        self.table_zones.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        self.table_zones.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.table_zones.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        self.table_zones.setAlternatingRowColors(True)
+        layout.addWidget(self.table_zones)
+        return page
+
+    def filter_zones(self, query):
+        q = query.lower()
+        for r in range(self.table_zones.rowCount()):
+            match = False
+            for c in range(self.table_zones.columnCount()):
+                item = self.table_zones.item(r, c)
+                if item and q in item.text().lower():
+                    match = True
+                    break
+            self.table_zones.setRowHidden(r, not match)
+
+    def add_zone_row(self):
+        r = self.table_zones.rowCount()
+        self.table_zones.insertRow(r)
+        self.table_zones.setItem(r, 0, QTableWidgetItem(str(r + 1)))
+        self.table_zones.setItem(r, 1, QTableWidgetItem("YENI ZONE"))
+        self.table_zones.setItem(r, 2, QTableWidgetItem("0"))
+        self.table_zones.setItem(r, 3, QTableWidgetItem(""))
+        self.table_zones.setItem(r, 4, QTableWidgetItem(""))
+
+    def load_default_zones(self):
+        self.table_zones.setRowCount(0)
+
+    # -------------------------------------------------------------
+    # SAYFA 3: DMR DİJİTAL KİŞİLER & TG (RADIOID DATABASE)
     # -------------------------------------------------------------
     def create_contacts_page(self):
         page = QWidget()
@@ -1701,7 +1811,255 @@ class ATD878Studio(QMainWindow):
             QMessageBox.critical(self, "CSV İçe Aktarma Hatası", str(exc))
 
     # -------------------------------------------------------------
-    # SAYFA 3: APRS VE GPS DOLAŞIM (ROAMING)
+    # SAYFA 4: WEBCPS & TÜRKİYE RÖLELERİ
+    # -------------------------------------------------------------
+    def create_webcps_page(self):
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setSpacing(14)
+
+        # Başlık ve Bilgi Kartı
+        info_card = QFrame()
+        info_card.setStyleSheet("background-color: #111827; border: 1px solid #1F2937; border-radius: 8px; padding: 14px;")
+        ic_layout = QVBoxLayout(info_card)
+        ic_title = QLabel("🌐 WebCPS & Türkiye Amatör Telsiz Kodplug Entegrasyonu")
+        ic_title.setStyleSheet("color: #38BDF8; font-size: 16px; font-weight: 800;")
+        ic_desc = QLabel(
+            "WebCPS (cps.aes.app) ve resmi AnyTone formatındaki kodplug paketlerini (.zip, .lst, .csv) içe/dışa aktarabilir,\n"
+            "doğrudan buluttan proje eşitleyebilir veya Türkiye Röle/Simplex şablonunu tek tıkla yükleyebilirsiniz."
+        )
+        ic_desc.setStyleSheet("color: #94A3B8; font-size: 12px; margin-top: 4px;")
+        ic_layout.addWidget(ic_title)
+        ic_layout.addWidget(ic_desc)
+        layout.addWidget(info_card)
+
+        # Türkiye Şablonu Hızlı Yükleme Grubu
+        grp_tr = QGroupBox("🇹🇷 Türkiye Amatör Telsiz Röle & DMR Kodplug Şablonu (TA1UAT / TA5THK)")
+        tr_lay = QVBoxLayout(grp_tr)
+        tr_info = QLabel("İçerik: 239 Kanal (VHF/UHF Analog Röleler, Simplex, DMR Röleler, İstanbul, Adana vb.), 8 Zone, 108 TalkGroup, 3 FM İstasyonu.")
+        tr_info.setStyleSheet("color: #CBD5E1; font-size: 12px;")
+        btn_load_tr = QPushButton("🇹🇷 Türkiye Kodplug Şablonunu Yükle (239 Kanal, 8 Zone, 108 TG)")
+        btn_load_tr.setStyleSheet("background-color: #065F46; color: #ECFDF5; font-weight: 700; padding: 10px; border-radius: 6px;")
+        btn_load_tr.clicked.connect(self.load_turkey_codeplug)
+        tr_lay.addWidget(tr_info)
+        tr_lay.addWidget(btn_load_tr)
+        layout.addWidget(grp_tr)
+
+        # Buluttan İndirme ve Eşitleme Grubu
+        grp_cloud = QGroupBox("☁️ WebCPS Proje Senkronizasyonu (cps.aes.app)")
+        c_lay = QVBoxLayout(grp_cloud)
+        c_desc = QLabel("WebCPS Proje Linki veya UUID girerek canlı kodplug paketini doğrudan indirin:")
+        c_desc.setStyleSheet("color: #94A3B8; font-size: 12px;")
+        c_lay.addWidget(c_desc)
+
+        h_link = QHBoxLayout()
+        self.txt_webcps_url = QLineEdit("https://cps.aes.app/projects/65c5cbc9-8182-4243-969b-a379f37a6beb")
+        self.txt_webcps_url.setPlaceholderText("https://cps.aes.app/projects/... veya UUID")
+        btn_fetch_cloud = QPushButton("⬇️ Projeyi İndir ve Eşitle")
+        btn_fetch_cloud.clicked.connect(self.fetch_webcps_cloud)
+        h_link.addWidget(self.txt_webcps_url)
+        h_link.addWidget(btn_fetch_cloud)
+        c_lay.addLayout(h_link)
+
+        self.webcps_status_lbl = QLabel("Durum: Beklemede")
+        self.webcps_status_lbl.setStyleSheet("color: #64748B; font-size: 11px;")
+        c_lay.addWidget(self.webcps_status_lbl)
+        layout.addWidget(grp_cloud)
+
+        # Dosyadan İçe / Dışa Aktarma Grubu
+        grp_file = QGroupBox("📁 WebCPS / AnyTone Paket Dosyaları (.zip, .lst, .csv)")
+        f_lay = QHBoxLayout(grp_file)
+        btn_import_zip = QPushButton("📦 Kodplug Paketi İçe Aktar (.zip)")
+        btn_import_zip.clicked.connect(self.import_webcps_zip)
+        btn_export_zip = QPushButton("💾 WebCPS Zip Olarak Dışa Aktar")
+        btn_export_zip.clicked.connect(self.export_webcps_zip_action)
+        f_lay.addWidget(btn_import_zip)
+        f_lay.addWidget(btn_export_zip)
+        layout.addWidget(grp_file)
+
+        # Özet İstatistik Paneli
+        self.webcps_summary_box = QTextEdit()
+        self.webcps_summary_box.setReadOnly(True)
+        self.webcps_summary_box.setMaximumHeight(140)
+        self.webcps_summary_box.setPlaceholderText("Yüklenen kodplug paketinin özet istatistikleri ve bilgileri burada görüntülenecektir...")
+        layout.addWidget(self.webcps_summary_box)
+
+        layout.addStretch()
+        return page
+
+    def apply_webcps_package(self, pkg: WebCPSPackage):
+        """Kanallar, Zonelar ve TalkGroupları GUI tablolarına yerleştirir."""
+        if not pkg:
+            return
+        # 1. Kanallar
+        if pkg.channels:
+            self.table_channels.setRowCount(len(pkg.channels))
+            for r, ch in enumerate(pkg.channels):
+                if isinstance(ch, list):
+                    for c, val in enumerate(ch[:8]):
+                        self.table_channels.setItem(r, c, QTableWidgetItem(str(val or "")))
+                elif isinstance(ch, dict):
+                    self.table_channels.setItem(r, 0, QTableWidgetItem(str(ch.get("no", r + 1))))
+                    self.table_channels.setItem(r, 1, QTableWidgetItem(str(ch.get("name", ""))))
+                    self.table_channels.setItem(r, 2, QTableWidgetItem(str(ch.get("rx_freq", ""))))
+                    self.table_channels.setItem(r, 3, QTableWidgetItem(str(ch.get("tx_freq", ""))))
+                    self.table_channels.setItem(r, 4, QTableWidgetItem(str(ch.get("mode", "FM"))))
+                    self.table_channels.setItem(r, 5, QTableWidgetItem(str(ch.get("power", "Turbo"))))
+                    self.table_channels.setItem(r, 6, QTableWidgetItem(str(ch.get("bandwidth", "25 kHz"))))
+                    self.table_channels.setItem(r, 7, QTableWidgetItem(str(ch.get("tone_cc", "CSQ"))))
+            self.filter_channels(self.chan_search.text())
+
+        # 2. Bölgeler / Zonelar
+        if pkg.zones:
+            self.table_zones.setRowCount(len(pkg.zones))
+            for r, z in enumerate(pkg.zones):
+                if isinstance(z, dict):
+                    ch_list = z.get("channels", [])
+                    m_count = len(ch_list) if isinstance(ch_list, list) else int(z.get("member_count", 0))
+                    ch_a = z.get("channel_a", "") or (ch_list[0] if ch_list else "")
+                    ch_b = z.get("channel_b", "") or (ch_list[1] if len(ch_list) > 1 else "")
+                    self.table_zones.setItem(r, 0, QTableWidgetItem(str(z.get("no", r + 1))))
+                    self.table_zones.setItem(r, 1, QTableWidgetItem(str(z.get("name", ""))))
+                    self.table_zones.setItem(r, 2, QTableWidgetItem(str(m_count)))
+                    self.table_zones.setItem(r, 3, QTableWidgetItem(str(ch_a)))
+                    self.table_zones.setItem(r, 4, QTableWidgetItem(str(ch_b)))
+                elif isinstance(z, list):
+                    for c, val in enumerate(z[:5]):
+                        self.table_zones.setItem(r, c, QTableWidgetItem(str(val or "")))
+            self.filter_zones(self.zone_search.text())
+
+        # 3. Kişiler / TalkGroups
+        if pkg.talkgroups:
+            self.table_contacts.setRowCount(len(pkg.talkgroups))
+            for r, tg in enumerate(pkg.talkgroups):
+                if isinstance(tg, list):
+                    for c, val in enumerate(tg[:6]):
+                        self.table_contacts.setItem(r, c, QTableWidgetItem(str(val or "")))
+                elif isinstance(tg, dict):
+                    self.table_contacts.setItem(r, 0, QTableWidgetItem(str(tg.get("dmr_id", ""))))
+                    self.table_contacts.setItem(r, 1, QTableWidgetItem(str(tg.get("callsign", ""))))
+                    self.table_contacts.setItem(r, 2, QTableWidgetItem(str(tg.get("name", ""))))
+                    self.table_contacts.setItem(r, 3, QTableWidgetItem(str(tg.get("city", ""))))
+                    self.table_contacts.setItem(r, 4, QTableWidgetItem(str(tg.get("country", "Turkey"))))
+                    self.table_contacts.setItem(r, 5, QTableWidgetItem(str(tg.get("call_type", "Grup Çağrısı (TG)"))))
+            self.filter_contacts(self.contact_search.text())
+
+        # Özet Raporu
+        summary = (
+            f"✅ Kodplug Paketi Başarıyla Yüklendi!\n"
+            f"• Proje Adı: {pkg.project_name}\n"
+            f"• Toplam Kanal: {len(pkg.channels)} (VHF/UHF Analog ve DMR)\n"
+            f"• Toplam Zone: {len(pkg.zones)} Bölge Grubu\n"
+            f"• Toplam TalkGroup / Kişi: {len(pkg.talkgroups)}\n"
+            f"• FM Radyo İstasyonu: {len(getattr(pkg, 'fm_stations', []))}\n"
+            f"• İsteğe Bağlı Ayarlar: {len(getattr(pkg, 'settings', {}))} parametre"
+        )
+        if hasattr(self, "webcps_summary_box"):
+            self.webcps_summary_box.setPlainText(summary)
+        self._schedule_workspace_save()
+        self.statusBar().showMessage(f"Kodplug uygulandı: {len(pkg.channels)} kanal, {len(pkg.zones)} zone, {len(pkg.talkgroups)} TG.", 8000)
+
+    def load_turkey_codeplug(self):
+        reply = QMessageBox.question(
+            self,
+            "Türkiye Şablonu Yükle",
+            "Mevcut çalışma alanındaki kanallar, zonelar ve kişiler Türkiye Amatör Telsiz şablonu (239 Kanal, 8 Zone, 108 TG) ile güncellenecek.\nDevam edilsin mi?",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.Yes,
+        )
+        if reply != QMessageBox.Yes:
+            return
+        try:
+            pkg = load_turkey_template()
+            self.apply_webcps_package(pkg)
+            QMessageBox.information(
+                self,
+                "Başarılı",
+                f"Türkiye Röle ve DMR Şablonu başarıyla yüklendi!\n\n"
+                f"• {len(pkg.channels)} Kanal\n• {len(pkg.zones)} Zone\n• {len(pkg.talkgroups)} TalkGroup\n\n"
+                f"Kanallar ve Bölgeler sayfalarından listeyi inceleyebilirsiniz."
+            )
+        except Exception as exc:
+            QMessageBox.critical(self, "Hata", f"Şablon yüklenirken hata oluştu: {exc}")
+
+    def fetch_webcps_cloud(self):
+        target = self.txt_webcps_url.text().strip()
+        if not target:
+            QMessageBox.warning(self, "Uyarı", "Lütfen geçerli bir WebCPS URL'si veya UUID girin.")
+            return
+
+        self.webcps_status_lbl.setText("Durum: WebCPS API'sine bağlanılıyor ve paket indiriliyor...")
+        self.webcps_thread = WebCPSFetchThread(target)
+        self.webcps_thread.progress_signal.connect(lambda msg: self.webcps_status_lbl.setText(f"Durum: {msg}"))
+        def on_finished(ok, pkg, err):
+            if ok and pkg:
+                self.webcps_status_lbl.setText("Durum: Paket başarıyla indirildi ve uygulandı.")
+                self.apply_webcps_package(pkg)
+                QMessageBox.information(self, "WebCPS Senkronizasyonu", f"WebCPS projesi başarıyla indirildi ve uygulandı:\n\n{pkg.project_name}\n{len(pkg.channels)} kanal, {len(pkg.zones)} zone, {len(pkg.talkgroups)} TG.")
+            else:
+                self.webcps_status_lbl.setText(f"Durum: Hata - {err}")
+                QMessageBox.critical(self, "WebCPS Hatası", f"WebCPS projesi indirilemedi:\n{err}")
+        self.webcps_thread.finished_signal.connect(on_finished)
+        self.webcps_thread.start()
+
+    def import_webcps_zip(self):
+        path, _ = QFileDialog.getOpenFileName(
+            self, "WebCPS / AnyTone Kodplug Paketi Seç", self.project_root, "Kodplug Paketi (*.zip *.lst);;Tüm Dosyalar (*)"
+        )
+        if not path:
+            return
+        try:
+            pkg = parse_webcps_zip(path)
+            self.apply_webcps_package(pkg)
+            QMessageBox.information(self, "Paket Yüklendi", f"Kodplug paketi başarıyla yüklendi:\n{len(pkg.channels)} kanal, {len(pkg.zones)} zone, {len(pkg.talkgroups)} TG.")
+        except Exception as exc:
+            QMessageBox.critical(self, "Paket Hatası", f"Paket çözümlenemedi: {exc}")
+
+    def export_webcps_zip_action(self):
+        path, _ = QFileDialog.getSaveFileName(
+            self, "WebCPS Zip Paketi Olarak Kaydet", os.path.join(self.project_root, "AnyTone_Codeplug_Export.zip"), "Zip Paketi (*.zip)"
+        )
+        if not path:
+            return
+        try:
+            channels = []
+            for r in range(self.table_channels.rowCount()):
+                channels.append({
+                    "no": self.table_channels.item(r, 0).text() if self.table_channels.item(r, 0) else str(r+1),
+                    "name": self.table_channels.item(r, 1).text() if self.table_channels.item(r, 1) else "",
+                    "rx_freq": self.table_channels.item(r, 2).text() if self.table_channels.item(r, 2) else "",
+                    "tx_freq": self.table_channels.item(r, 3).text() if self.table_channels.item(r, 3) else "",
+                    "mode": self.table_channels.item(r, 4).text() if self.table_channels.item(r, 4) else "FM",
+                    "power": self.table_channels.item(r, 5).text() if self.table_channels.item(r, 5) else "Turbo",
+                    "bandwidth": self.table_channels.item(r, 6).text() if self.table_channels.item(r, 6) else "25 kHz",
+                    "tone_cc": self.table_channels.item(r, 7).text() if self.table_channels.item(r, 7) else "CSQ",
+                })
+            zones = []
+            for r in range(self.table_zones.rowCount()):
+                zones.append({
+                    "no": self.table_zones.item(r, 0).text() if self.table_zones.item(r, 0) else str(r+1),
+                    "name": self.table_zones.item(r, 1).text() if self.table_zones.item(r, 1) else "",
+                    "member_count": int(self.table_zones.item(r, 2).text()) if self.table_zones.item(r, 2) and self.table_zones.item(r, 2).text().isdigit() else 0,
+                    "channel_a": self.table_zones.item(r, 3).text() if self.table_zones.item(r, 3) else "",
+                    "channel_b": self.table_zones.item(r, 4).text() if self.table_zones.item(r, 4) else "",
+                })
+            talkgroups = []
+            for r in range(self.table_contacts.rowCount()):
+                talkgroups.append({
+                    "dmr_id": self.table_contacts.item(r, 0).text() if self.table_contacts.item(r, 0) else "",
+                    "callsign": self.table_contacts.item(r, 1).text() if self.table_contacts.item(r, 1) else "",
+                    "name": self.table_contacts.item(r, 2).text() if self.table_contacts.item(r, 2) else "",
+                    "city": self.table_contacts.item(r, 3).text() if self.table_contacts.item(r, 3) else "",
+                    "country": self.table_contacts.item(r, 4).text() if self.table_contacts.item(r, 4) else "Turkey",
+                    "call_type": self.table_contacts.item(r, 5).text() if self.table_contacts.item(r, 5) else "Grup Çağrısı (TG)",
+                })
+            saved_path = export_webcps_zip(channels, zones, talkgroups, path)
+            QMessageBox.information(self, "Dışa Aktarma Başarılı", f"WebCPS uyumlu kodplug paketi başarıyla kaydedildi:\n{saved_path}")
+        except Exception as exc:
+            QMessageBox.critical(self, "Dışa Aktarma Hatası", f"Paket kaydedilemedi: {exc}")
+
+    # -------------------------------------------------------------
+    # SAYFA 5: APRS VE GPS DOLAŞIM (ROAMING)
     # -------------------------------------------------------------
     def create_aprs_page(self):
         page = QWidget()
