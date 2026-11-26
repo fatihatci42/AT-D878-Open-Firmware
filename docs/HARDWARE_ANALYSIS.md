@@ -135,48 +135,61 @@ ve DMA davranışları farklılık gösterir. STM32 kodunu doğrudan kullanmayı
 | Özellik | Değer | Doğrulama |
 |---------|-------|-----------|
 | **Tip** | Tek çipli VHF/UHF transceiver | ✅ Doğrulandı |
-| **VHF Bandı** | 134-174 MHz | ✅ Doğrulandı |
-| **UHF Bandı** | 400-520 MHz | ✅ Doğrulandı |
-| **Kontrol Arayüzü** | I2C veya 3/4-wire SPI | ✅ Doğrulandı |
-| **Register Genişliği** | 16-bit data, 7-bit adres | ✅ Doğrulandı |
-| **Genişletilmiş Adres** | 0x7F üzeri için bank switching | ✅ Doğrulandı |
+| **VHF Bandı** | 131–178 MHz (ölçülen kilit aralığı) | ✅ RE doğruladı |
+| **UHF Bandı** | 393–572 MHz (ölçülen kilit aralığı) | ✅ RE doğruladı |
+| **220 Bandı** | 200–286 MHz (÷4 bölücü) | ✅ RE doğruladı |
+| **Kontrol Arayüzü** | **Bit-banged 3-wire GPIO** | ✅ RE doğruladı |
+| **Register Genişliği** | 16-bit data, 7-bit adres, 0x80 = oku | ✅ RE doğruladı |
 | **Kanal Genişliği** | 12.5 kHz / 25 kHz | ✅ Doğrulandı |
-| **Frekans Hesaplama** | 30-bit tuning word (0x29+0x2A) | ✅ Doğrulandı |
+| **Frekans Kayıt** | Reg 0x29/0x2A = f_kHz × 16 | ✅ RE doğruladı |
+| **PLL Kilit** | Reg 0x0D[15] = lock flag | ✅ RE doğruladı |
+| **VCO** | ~779–1145 MHz, bölücü ÷6/÷4/÷2 | ✅ RE doğruladı |
 
 **Görevi:** VHF ve UHF bantlarında RF sinyal alımı ve üretimi. Frekans sentezi,
 modülasyon, demodülasyon, squelch algılama, RSSI ölçümü.
 
-**MCU ile Haberleşme:** I2C (cihazda hangi bus kullanıldığı doğrulanmalı)
+**MCU ile Haberleşme: Bit-banged 3-wire GPIO (I2C DEĞİL)**
 
-**Register Haritası (Kısmi - Doğrulanmış):**
+> **⚠️ DİKKAT:** `driver_at1846s.c` şu an yanlışlıkla `hal_i2c_write_reg`
+> kullanıyor. Stok firmware RE ile kesinlikle doğrulandı: AT1846S,
+> `at1846_write_reg` (0x0807A6FC, 324 çağrı) ile **bit-banged GPIO** üzerinden
+> erişilir. Sürücü `hal_gpio` ile yeniden yazılmalı.
 
-| Adres | İşlev |
-|-------|-------|
-| 0x04 | Saat modu (frekans aralığı) |
-| 0x08 | LDO bypass |
-| 0x09 | LDO çıkış gerilimi |
-| 0x0A | PA bias gerilimi |
-| 0x0F | Bant seçimi (VHF/UHF/220 MHz) |
-| 0x1F | GPIO modları (VOX, squelch, TXON, RXON vb.) |
-| 0x29 | RF frekans üst kısım (bit 29:16) |
-| 0x2A | RF frekans alt kısım (bit 15:0) |
-| 0x2B | Referans saat frekansı (kHz) |
-| 0x2C | ADC saat frekansı (kHz) |
-| 0x2D | Interrupt enable mask |
-| 0x30 | Kanal modu (12.5/25 kHz) |
-| 0x44 | RX ses seviyesi |
+| Sinyal | MCU Pini | Stok firmware sabiti |
+|--------|----------|----------------------|
+| SCLK   | **PB3**  | `at1846_sclk`        |
+| SDIO   | **PB4**  | `at1846_sdio`        |
+| SEN    | **PB5**  | `at1846_sen`         |
 
-**Açık Kaynak Sürücüleri:**
-- OpenRTX AT1846S driver (C++, kapsamlı)
-- RadioFoundry AT1846S implementasyonu
-- MMDVM AT1846S register tanımları
+**Frekans hesaplama (doğrulanmış):**
+- `reg_val = (freq_hz / 10000) * 16`  — yani `f_kHz × 16` (NOT: `(f << 16) / xtal`)
+- Reg 0x05 spur kaçınma için bazı frekanslarda değişir (144, 159, 410, 455, 476–482 MHz)
 
-**⚠️ Doğrulanması Gerekenler:**
-- AT-D878UVII Plus'ta I2C mi yoksa SPI mi kullanılıyor?
-- Kullanılan referans kristal frekansı
-- GPIO pin bağlantıları (MCU ↔ AT1846S)
-- PA kontrol ve güç ölçüm devreleri
-- 220 MHz bandı donanımsal destek durumu
+**RX izleme filtresi:** TIM3 CCR1 PWM — her retune'da ayarlanmalı.  
+**Front-end GPIO:** AT1846S reg 0x1F — `[9:8]` VHF, `[1:0]` UHF, `11` = açık.
+
+**Register Haritası (Stok Firmware RE ile Doğrulanmış):**
+
+| Adres | İşlev | Kaynak |
+|-------|-------|--------|
+| 0x04 | CLK mode | ✅ RE |
+| 0x05 | Ref/spur seçimi (8763/8543/8643) | ✅ RE ölçüm |
+| 0x0D | [15] PLL lock flag | ✅ RE ölçüm |
+| 0x0F | [7:6] bant durum okuma (R/O: 11=VHF÷6, 10=220÷4, 00=UHF÷2) | ✅ RE ölçüm |
+| 0x13 | [8:0] VCO cap-bank (511=sınır dışı) | ✅ RE ölçüm |
+| 0x1B | RSSI (8-bit) | ✅ RE doğrulandı |
+| 0x1F | GPIO: [9:8]=VHF frontend, [1:0]=UHF frontend (11=açık, 10=kapalı) | ✅ RE |
+| 0x29 | RF frekans üst: f_kHz × 16 >> 16 | ✅ RE doğrulandı |
+| 0x2A | RF frekans alt: f_kHz × 16 & 0xFFFF | ✅ RE doğrulandı |
+| 0x29/0x2A | Okunduğunda VCO frekansı ÷6 döner (reg05=8763'te) | ✅ RE ölçüm |
+| 0x30 | [13:12]=bant genişliği, [5]=RX on, [6]=TX on | ✅ RE |
+| 0x49 | Squelch eşik (rf_squelch_cal_apply hedefi) | ✅ RE |
+| 0x7F | Page register (page 0x7F=1 = AGC tablo) | ✅ RE |
+
+**⚠️ Hâlâ Doğrulanması Gerekenler:**
+- Referans kristal frekansı (26 MHz varsayılıyor)
+- PA kontrol ve güç ölçüm devreleri (APC DAC = DAC ch1 kesin)
+- 220 MHz bandı ön-filtre konfigürasyonu
 
 ---
 
@@ -191,7 +204,21 @@ modülasyon, demodülasyon, squelch algılama, RSSI ölçümü.
 | **İşleme Katmanları** | PHY + Data Link + Call Control | ✅ Doğrulandı |
 | **Güç Tüketimi** | ~64 mW (DMR), ~38 mW (dPMR) | ✅ Doğrulandı |
 | **Paket** | QFN64 | ✅ Doğrulandı |
-| **MCU Arayüzü** | HPI (Host Port Interface) | ✅ Doğrulandı |
+| **MCU Arayüzü** | **8-bit HPI (Host Port Interface)** | ✅ RE doğruladı |
+
+**MCU ile Haberleşme: 8-bit HPI — adres satırı yok, paralel veri yolu.**
+
+| Sinyal | MCU Pini | Stok Fonksiyon |
+|--------|----------|----------------|
+| Data[7:0] | PD8–PD15 | 8-bit veri yolu |
+| HCSN | PD2 | Chip select (negatif) |
+| HWRN | PD3 | Yazma (negatif) |
+| HRDN | PD4 | Okuma (negatif) |
+
+Stok erişim: `hpi_write_byte/buf`, `hpi_read_byte` @ `0x080823BA`.
+Wrapper'lar: `0x0808711A / 32 / 3E`.
+Op-code dispatcher'lar: `sct_query` @ `0x0808B91A`, `sct_command` @ `0x0808C7D2`.
+SCT3258 komut kuyruğu 40 girişli (`dmr_bb_cmd_enqueue(op,a,b,c)`).
 
 **Görevi:** DMR dijital ses ve veri işlemenin tamamını gerçekleştirir:
 - TDMA slot zamanlama (Slot 1 ve Slot 2)
@@ -202,35 +229,16 @@ modülasyon, demodülasyon, squelch algılama, RSSI ölçümü.
 - Çağrı kontrol katmanı
 - Otomatik dijital/analog mod algılama ve geçişi
 
-**MCU ile Haberleşme:** HPI (Host Port Interface) - paralel veri yolu.
-SCT3258, MCU'ya bağımlı bir "baseband co-processor" olarak çalışır.
-MCU, HPI üzerinden komut gönderir ve durum/veri okur.
-
 **⚠️ KRİTİK KISITLAMALAR:**
 1. **Datasheet Erişimi:** SCT3258 tam teknik dokümanı halka açık değildir.
    CML Micro web sitesinden product brief erişilebilir ancak tam register
    haritası ve HPI protokolü NDA gerektiriyor olabilir.
 2. **AMBE+2 Lisansı:** SCT3258 içindeki AMBE+2 vocoder DVSI'nin mülkiyetindedir.
    Bu codec'in yazılımsal olarak çoğaltılması patent ihlalidir.
-3. **HPI Protokolü:** Host Port Interface'in tam dokümantasyonu olmadan
-   SCT3258'i kontrol etmek çok zordur. RadioFoundry bu konuda araştırma yapmaktadır.
-4. **Alternatif Kullanım:** SCT3258'i bypass ederek MCU üzerinden doğrudan
-   dijital modülasyon yapmak teorik olarak mümkün olabilir ancak zamanlama
-   gereksinimleri çok sıkıdır.
-
-**Açık Kaynak Sürücüleri:** Tam açık kaynak sürücü **mevcut değil**.
-- RadioFoundry aktif olarak SCT3258 reverse engineering yapmaktadır
-- MMDVM projesinde SCT3258 referansları bulunmaktadır
-- Bazı Çin kökenli forumlarda kısmi bilgiler mevcuttur
-
-**DMR Ses İşleme Zinciri:**
-```
-Mikrofon → AIC3204 (ADC) → I2S → SCT3258 (AMBE+2 Encode)
-    → 4FSK Baseband → AT1846S (RF TX)
-
-AT1846S (RF RX) → 4FSK Baseband → SCT3258 (AMBE+2 Decode)
-    → I2S → AIC3204 (DAC) → Hoparlör
-```
+3. **HPI Protokolü:** Stok firmware RE ile HPI pin bağlantıları doğrulandı
+   (PD2–PD4, PD8–PD15) ancak tam komut seti hâlâ tersine mühendislik aşamasında.
+4. **Kod alanı:** Stok firmware DMR stack'i `0x08084000–0x08094000` arasında.
+   RE süreci devam ediyor (sct_query/sct_command op-code'ları kısmen haritalandı).
 
 ---
 
@@ -302,19 +310,32 @@ saklanması.
 |---------|-------|-----------|
 | **Boyut** | 1.77 inç | ✅ Doğrulandı |
 | **Tip** | Renkli TFT LCD | ✅ Doğrulandı |
-| **Çözünürlük** | Muhtemelen 128×160 veya 160×128 | ⚠️ Doğrulanacak |
-| **Kontrolcü** | Muhtemelen ST7735 veya ILI9163 serisi | ⚠️ Doğrulanacak |
-| **Arayüz** | SPI (muhtemelen) | ⚠️ Doğrulanacak |
+| **Çözünürlük** | **160×128** piksel | ✅ RE doğruladı |
+| **Kontrolcü** | **ST7735S** | ✅ RE doğruladı |
+| **Arayüz** | **8080 Paralel (GPIO)** | ✅ RE doğruladı |
+| **Renk** | RGB565 (16-bit) | ✅ RE doğruladı |
 
 **Görevi:** Kullanıcı arayüzü görüntüleme - kanal bilgisi, frekans,
 DMR verileri, sinyal gücü, pil durumu, menüler.
 
-**⚠️ Doğrulanması Gerekenler:**
-- Tam piksel çözünürlüğü
-- LCD kontrolcü IC modeli
-- SPI bağlantı pinleri
-- Arka aydınlatma kontrolü (PWM pin)
-- Renk derinliği (16-bit RGB565 bekleniyor)
+**⚠️ DİKKAT — SPI DEĞİL, 8080 PARALEL:**
+
+Stok firmware RE ile kesinlikle doğrulandı: ekran SPI üzerinden değil,
+8080 paralel GPIO bus üzerinden sürülür.
+
+| Sinyal | MCU Pini | Stok Fonksiyon |
+|--------|----------|----------------|
+| Data[7:0] | PE7–PE14 | 8-bit veri yolu |
+| D/CX | PB10 | Komut/veri seçici |
+| RST  | PB11 | Donanım reset |
+| CS   | PB12 | Chip select |
+| WR   | PB13 | Yazma strobe |
+
+Stok fonksiyonlar: `lcd_init_st7735`, `lcd_draw_text` (ASCII + GB2312 font).
+`driver_display.c` SPI varsayımı içeriyorsa EXMC/GPIO paralel'e taşınmalıdır.
+
+**⚠️ Hâlâ Doğrulanması Gerekenler:**
+- Arka aydınlatma PWM pin'i
 
 ---
 
@@ -340,35 +361,43 @@ DMR verileri, sinyal gücü, pil durumu, menüler.
 | Özellik | Değer | Doğrulama |
 |---------|-------|-----------|
 | **Tip** | Kompakt GPS alıcı modülü | ✅ Doğrulandı |
-| **Arayüz** | UART (seri) | ✅ Doğrulandı |
-| **Protokol** | NMEA 0183 | ✅ Bekleniyor |
-| **Baud Rate** | 9600 veya 115200 | ⚠️ Doğrulanacak |
+| **Arayüz** | UART (USART2 / GD adıyla USART1) | ✅ RE doğruladı |
+| **Protokol** | NMEA 0183 | ✅ RE doğruladı |
+| **Baud Rate** | **9600** | ✅ RE doğruladı |
+| **MCU Pini** | 0x40004400 = ST USART2 (GD "USART1") | ✅ RE |
+| **Konfig komutları** | MTK/CASIC / $CFG (UBX yok) | ✅ RE doğruladı |
 
-**Görevi:** Gerçek zamanlı konum verisi sağlama. APRS konum raporlama,
-DMR GPS verisi, kullanıcı konumu gösterimi.
+Stok fonksiyonlar: `nmea_rx_char`, `gps_module_config`.
 
-**⚠️ Doğrulanması Gerekenler:**
-- GPS modül üretici/model
-- UART bağlantı pinleri
+**⚠️ Hâlâ Doğrulanması Gerekenler:**
+- GPS modül üretici/model (fiziksel teardown)
 - Desteklenen GNSS sistemleri (GPS, GLONASS, BeiDou?)
-- Güncelleme hızı (1 Hz, 5 Hz?)
+- Güncelleme hızı
 
 ---
 
-### 2.9. Bluetooth Modülü
+### 2.9. Bluetooth / APRS LinkBoard Modülü
 
 | Özellik | Değer | Doğrulama |
 |---------|-------|-----------|
-| **Varlığı** | Evet (Plus modelde) | ✅ Doğrulandı |
-| **Alt Kart** | Ayrı BT/APRS daughterboard | ✅ Doğrulandı |
-| **Arayüz** | UART (muhtemelen) | ⚠️ Doğrulanacak |
-| **İşlev** | BT ses, BT PTT, BT programlama | ✅ Doğrulandı |
+| **Varlığı** | Evet (Plus modelde, BHT V2.00) | ✅ RE doğruladı |
+| **Alt Kart** | Ayrı BT/APRS daughterboard (BHT V2.00 H/M) | ✅ RE doğruladı |
+| **Arayüz** | **UART4 (PC10/PC11)** | ✅ RE doğruladı |
+| **Güç Pin** | PE15 | ✅ RE doğruladı |
+| **Probe baud** | 115200 (`AT+VER?`) → "APRS…" = APRS board | ✅ RE doğruladı |
+| **Çalışma baud** | 9600 (probe sonrası) | ✅ RE doğruladı |
 
-**⚠️ Doğrulanması Gerekenler:**
-- BT modül üretici/model
+**Protokoller:**
+- Binary çerçeve: `7E len cmd payload sum EF` (`bt_send_frame`)
+  - 0xCA komutu = bt_probe (×100)
+- ASCII AT komutları: `AT+BTON`, `+CONN`, `+PTTKEY`, `+PTT=P/R`, `+APRS:` (RX frame taşır)
+
+Stok fonksiyon tablosu: `0x080B2E8C`. Firmware güncelleme modu: `mode_byte 0x20000951 == 0x14`
+= UART4↔USB passthrough (BT firmware update).
+
+**⚠️ Hâlâ Doğrulanması Gerekenler:**
+- BT modül üretici/model (fiziksel teardown)
 - BT sürümü (4.x? 5.x? BLE?)
-- UART bağlantı pinleri
-- AT komut seti (varsa)
 
 ---
 
@@ -377,13 +406,15 @@ DMR GPS verisi, kullanıcı konumu gösterimi.
 | Özellik | Değer | Doğrulama |
 |---------|-------|-----------|
 | **Varlığı** | Evet | ✅ Doğrulandı |
-| **Frekans Aralığı** | 76-108 MHz (bölgesel) | ⚠️ Doğrulanacak |
-| **Implementasyon** | AT1846S içinde veya ayrı IC | ⚠️ Doğrulanacak |
+| **IC** | **BK1080** (AT1846S'ten bağımsız) | ✅ RE doğruladı |
+| **Arayüz** | **I2C: PB6 SDA / PB7 SCL, adres 0x20** | ✅ RE doğruladı |
+| **Register protokolü** | Si470x-style sıralı yazma, reg 0x02'den | ✅ RE doğruladı |
+| **Stereo/RDS** | Muhtemelen yok (BK1080 mono FM alıcı) | ⚠️ Doğrulanacak |
 
-**⚠️ Doğrulanması Gerekenler:**
-- AT1846S içinde mi yoksa ayrı bir çipte mi?
-- Stereo/mono desteği
-- RDS desteği
+Stok fonksiyonlar: `fm_chip_init`, `fm_set_volume`.
+
+> AT1846S ile **karıştırılmamalı** — AT1846S sadece VHF/UHF (134–572 MHz),
+> FM yayın (76–108 MHz) BK1080 üzerinden alınır.
 
 ---
 
@@ -492,27 +523,52 @@ DMR GPS verisi, kullanıcı konumu gösterimi.
 
 ## 5. Doğrulama Öncelikleri
 
-### 5.1. Fiziksel Teardown ile Doğrulanması Gerekenler
-Aşağıdaki bilgiler yalnızca cihaz kartının fiziksel incelenmesiyle doğrulanabilir:
+### 5.1. RE ile Doğrulanmış Bilgiler (Artık Sorgulanmaya Gerek Yok)
 
-1. ☐ NAND flash çip modeli ve üreticisi
-2. ☐ LCD kontrolcü IC modeli
-3. ☐ AT1846S bağlantı tipi (I2C vs SPI)
-4. ☐ GPS modül modeli
-5. ☐ Bluetooth modül modeli
-6. ☐ Şarj yönetim IC modeli
-7. ☐ PA MOSFET modelleri
-8. ☐ Güç regülatör IC'leri
-9. ☐ Referans kristal frekansı
-10. ☐ Daughterboard konnektör pinout
+Aşağıdakiler stok firmware V4.00 tersine mühendisliği ile kesin olarak doğrulandı
+(bkz. `docs/REVERSE_ENGINEERING_BRIDGE.md`):
 
-### 5.2. Yazılım/Protokol ile Doğrulanması Gerekenler
+| ✅ Doğrulandı | Kaynak |
+|---|---|
+| AT1846S → bit-banged 3-wire GPIO (PB3/PB4/PB5) | RE: `at1846_write_reg` 324 çağrı |
+| AT1846S frekans = f_kHz × 16 (reg 0x29/0x2A) | RE: `at1846_set_freq` 0x0805F504 |
+| AT1846S PLL kilit: reg 0x0D[15] | RE: stok ölçüm |
+| VCO sınırları: VHF 131–178, 220 200–286, UHF 393–572 MHz | RE: stok radyo ölçümü |
+| LCD = ST7735S, 160×128, 8080 paralel (PE7–14, PB10–13) | RE: `lcd_init_st7735` |
+| SCT3258 HPI: PD8–15 (data), PD2 HCSN, PD3 HWRN, PD4 HRDN | RE: `hpi_write_byte` |
+| BK1080 FM alıcı: I2C PB6/PB7, adres 0x20 | RE: `fm_chip_init` |
+| GPS: USART2, 9600 baud, NMEA, MTK/CASIC | RE: `nmea_rx_char` |
+| BT/APRS: UART4 PC10/PC11, güç PE15, baud 115200→9600 | RE: `bt_board_probe` |
+| SPI NAND: CS=PB8, GigaDevice 0xC8 | RE: `spiflash_detect_id` |
+| USB CDC: GD32 VID 28e9:018a, OUT EP3 64B, IN EP 0x81 | RE: stok doğrulandı |
+| MCU başlangıç: SP=0x20015720, Reset=0x08004C90 | RE: image analiz |
+| Bootloader: 0x08000000–0x08003FFF (16 KB), güncelleme dosyasında YOK | RE: `.CDI` analiz |
+| ADC ch10 = PC0 = pre-squelch RX audio (DMA-dairesel) | RE: TIM6 IRQ analiz |
+| TX audio: PB9 = TIM4 CH4 PWM DAC 76.8 kHz | RE: `afsk_pwm_buf` DMA |
+| RX izleme filtresi: TIM3 CCR1 PWM | RE: `rf_frontend_tune_from_tables` |
+| APC DAC = DAC ch1 (PA güç kontrolü) | RE: `apc_dac_write` |
+| Unknown I2C dev: PB6/PB7, adres 0x3A, reg 0x10 poll | RE: `i2c_0x3a_read_reg` |
+| Ses codec (TLV320AIC3204) → SCT3258 serial port 1 üzerinden | RE: `sct_codec_write*` |
+| uC/OS-II: 200 Hz tick, 34 TCB, LOWEST_PRIO=63 | RE: OS analiz |
 
-1. ☐ USB VID/PID değerleri
-2. ☐ Firmware güncelleme protokolü detayları
-3. ☐ Bootloader adresi ve boyutu
-4. ☐ Codeplug format farkları (V4.00)
-5. ☐ SCT3258 HPI komut seti
+### 5.2. Fiziksel Teardown ile Doğrulanması Gerekenler
+
+1. ☐ NAND flash çip modeli ve üreticisi (D878UV=1Gbit, UVII=2Gbit ama model bilinmiyor)
+2. ☐ LCD arka aydınlatma PWM pin'i
+3. ☐ GPS modül modeli (MTK/CASIC komutları destekleniyor ama üretici bilinmiyor)
+4. ☐ BT modül modeli ve BT sürümü
+5. ☐ Şarj yönetim IC modeli
+6. ☐ PA MOSFET modelleri
+7. ☐ Güç regülatör IC'leri
+8. ☐ Referans kristal frekansı (26 MHz varsayılıyor)
+9. ☐ Daughterboard konnektör pinout (fiziksel)
+10. ☐ Unknown I2C device 0x3A kimliği
+
+### 5.3. Yazılım/Protokol ile Doğrulanması Gerekenler
+
+1. ☐ SCT3258 HPI tam komut seti (RE devam ediyor)
+2. ☐ Codeplug format V4.00 farkları (kısmen `anytone-flash-tools`'da var)
+3. ☐ AT1846S 220 MHz bandı ön-filtre konfigürasyonu
 
 ---
 

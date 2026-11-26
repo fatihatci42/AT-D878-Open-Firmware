@@ -1,0 +1,132 @@
+# RAM globals: addr name type   (type: u8 u16 u32 ptr  or  T[N]  or  -  for label only)
+# Applied by SetupGlobals.java. Sources: ui.md, pc_link.md, OVERVIEW.md.
+# --- OS / tasks
+2000130A OSRunning              u8
+20013930 OSTCBPrioTbl           ptr[64] # uC/OS-II: TCB per priority (OSTaskCreate reserves with 1); 0 = priority free
+200012FD OSIntNesting           u8
+20000DE8 os_flags_usb_dmr       ptr    # OS_FLAG_GRP*: 0x10 wakes p3, 0x08 wakes p8 (posted 0x18 every 10 ms)
+20000944 key_mbox               ptr    # OS_EVENT* p10 mailbox
+2000093C key_done_sem           ptr    # posted by p10 after each key
+20000901 key_post_code          u8     # keypad_scan/radio.py key writes code here, then FUN_08028F50
+20000988 disp_mbox              ptr    # OS_EVENT* p12 mailbox
+# --- UI
+20000951 screen_id              u8
+200010D4 pc_mode_active         u8     # 1 = PC programming mode: SysTick_Handler stops calling OSTimeTick (OS frozen), delay_ms busy-waits; set by radio_quiesce_for_pc, which p3 enters whenever screen_id > 0x22 and then loops in usb_pc_link_step until screen 0x21 (no way back but a reset)
+2000098C lcd_bus_sem            ptr    # OS_EVENT*: LCD and keypad matrix share PE7-14; ui_render and keypad_scan both pend it
+20000BE8 ui_event_sem           ptr    # OS_EVENT*: serialises task_p10 key handling and task_p11 event handling
+20000CBE powersave_idle_countdown u16  # reloaded by ui_activity_wake (table 0x080AE93C[radio_settings[0x37]]), counted down by tmr_10ms_soft_timers; powersave_step sleeps at 0
+20001071 encoder_pending_key11  u8     # set by EXTI9_5_IRQHandler (PC8 edge, PC8!=PC9); encoder_poll posts key 0x11
+20001072 encoder_pending_key12  u8     # set by EXTI9_5_IRQHandler (PC8 edge, PC8==PC9); encoder_poll posts key 0x12
+20000900 key_press_state        u8     # keypad_scan: 1 pressed, 2 long press reached, 0 released; ui_key_handler picks short/long/release handlers from it
+20000904 key_long_press         u8     # set with key_press_state on long press; long press runs key_fn_table[long-key setting]
+200001B0 key_code               u8
+20007FF8 radio_settings         u8[256]  # mirror of codeplug 0x02500000 (anytone-flash-tools map): +3 auto shutdown, +5 lang, +0x0B power save (0 off, 1 = 1:1, 2 = 2:1), +0x10..0x14 PF key funcs, +0x15/+0x16 VF/MR A/B (1 = VFO), +0x2C main side (0 A, 1 B), +0x2D sub channel (dual watch) on
+200003DC cur_chan_rec           ptr    # channel record the menus edit
+200003E4 rf_chan_rec            ptr    # channel record the RF code uses (+8 &3 type, +0x39 freq corr)
+200003C0 rx_freq_10hz           u32
+200003B4 tx_freq_10hz           u32
+2000A33C region_info            u8[8]  # copy of factory block head; +3 = region index
+2000095C disp_pending_bits      u32    # app_event_post ORs here
+20000958 disp_dirty_bits        u32
+2000094C ui_fg_color            u16
+2000094E ui_bg_color            u16
+20000918 popup_desc             ptr
+20000B20 menu_node              u8     # KeyTab index
+20000B78 menu_fn                ptr
+20000AF4 menu_redraw            u8
+20000B30 menu_depth             u8
+20007DF0 menu_path              u32[20]
+20007E40 menu_path_prev_cursor  u32[20]
+20007EF4 menu_path_top          u32[20]
+20007F44 menu_path_b08          u32[20]
+20007FE4 menu_path_node         u8[20]
+20007E90 menu_path_item         ptr[20]
+20007EE0 menu_path_type         u8[20]
+20007F94 menu_path_count        u32[20]
+20000AD4 list_cursor            u32
+20000AD8 list_prev_cursor       u32
+20000B04 list_top               u32
+20000AFC list_count             u32
+20000B24 list_items             ptr
+20000B00 list_type              u8
+20000B2C list_title             ptr
+200006C8 chanset_opt_desc       ptr[42]
+# --- PC link
+2000D5A8 pc_buf                 u8[1024]
+2000D9A8 usb_cdc_handle         -
+20001090 pc_rx_len              u16
+20001092 pc_cmd_valid           u8
+20001096 pc_session             u8
+20001097 pc_code                u8
+200010A8 pc_addr                u32
+200010CA pc_reply_len           u16
+2000EAB8 pc_page_buf            u8[1024]
+# --- SPI NAND
+200058B0 nand_bbt               -      # bad-block remap table; +0x1F6 count, +0x1F7 enabled
+2000507C nand_page_buf          u8[2048]
+# --- SCT3258
+2000F8F8 sct_msg                -      # +0 TYPE, +4 nfields, +6 ids[30], +0x24 ptrs[30], +0x9C rx pkts
+2000F7CC sct_txbuf              u8[300]
+2000F6A0 sct_rxbuf              u8[300]
+2000F631 sct_rx_state           -
+200011C0 sct_evt_mask           u32
+# --- RF
+20000DE0 rf_is_1846n            u8
+20009FD6 rf_tune_cal_uhf        u16[13] # RX tracking-filter PWM (TIM3 CCR1) at 400..520 MHz, 10 MHz steps; rf_frontend_tune_from_tables interpolates per 1 MHz
+20009FF4 rf_tune_cal_vhf        u16[39] # same, 136..174 MHz in 1 MHz steps (interpolated per 0.1 MHz)
+2000A042 rf_tune_cal_220        u16[6]  # same, 220..225 MHz in 1 MHz steps
+20000C0C at1846_reg1f_shadow    u16    # copy of AT1846S reg 0x1F (chip GPIO pins): [9:8] VHF front end, [1:0] UHF front end (11 on, 10 off); at1846_*_frontend_set
+20000C10 at1846_bus_sem         ptr    # OS_EVENT* semaphore guarding the AT1846S bus (rf_*_frontend_set wrappers); debug-channel calls bypass it
+20000DE1 rf_variant_tag         u8[5]
+# --- BT (UART4)
+2000AC04 bt_rxbuf               u8[200]  # UART4 line buffer, index bt_rx_len (<200)
+20000EAD bt_rx_len              u8
+20000EB3 bt_rx_hold             u8     # !=0: bt_uart4_rx_byte drops bytes (set while a frame is processed)
+20000EDC bt_module_ok           u8     # bt_board_probe got an answer
+20000F48 aprs_board_present     u8     # probe reply starts "APRS"; unhides Ana APRS Info / APRS Receive menus
+# --- APRS RX (frames arrive as "+APRS:" + raw AX.25 on UART4; see docs/aprs.md)
+20000F49 aprs_rx_in_frame       u8
+20000F4B aprs_rx_hdr_state      u8     # 0 wait 0x03, 1 wait 0xF0, 2 wait closing '~'
+20000F4A aprs_rx_frame_ready    u8     # set by aprs_rx_frame_byte, consumed by aprs_rx_frame_process (p14)
+20000F73 aprs_rx_frame_len      u8
+2000C10F aprs_rx_frame          u8[300]  # copy of bt_rxbuf: "+APRS:" .. '~' addr ctl pid info FCS '~'
+20000E68 crc16_x25_val          u16
+20000F4E aprs_dst_call          u8[6]  # AX.25 dest (shifted back to ASCII); +7 = ssid
+20000F56 aprs_src_call          u8[6]  # +6 (0x20000F5C) = ssid
+2000C23B aprs_path_raw          u8[60]
+2000C277 aprs_path              u8[36]  # 4 x 9-char digipeater fields
+20000F4C aprs_tx_holdoff        u16    # !=0 (own AFSK TX recently): RX frames ignored
+20000F9C aprs_filter_on         u8     # Info Filter: only accept sources in the 32-entry list
+2000A51B aprs_pass_all          u8     # APRSPassAll: accept frames that fail the FCS
+20000FE2 aprs_rx_kind           u8     # 0 position/info, 2 message to me
+2000C394 aprs_info_rec          u8[256]  # record written to the NAND inbox
+20000FD6 aprs_info_count        u16
+2000003E ana_sq_open            u8     # analog squelch (+CTCSS/DCS per squelch mode) open
+20000047 ana_rx_audio_open      u8     # copy of ana_sq_open; gates APRS frame acceptance
+# --- ADC / audio (adc_dma_init_pc0_audio_pc1_batt: ADC1 ch10/11/12 -> DMA1 ch1 circular)
+20001048 adc_pc0_rx_audio       u16    # RX audio (pre-squelch), 12-bit
+2000104A adc_pc1_battery        u16
+2000104C adc_pc2_unknown        u16
+20000178 tim6_audio_mode        u8     # 1 tone sampling, 2 9.02 kHz 8-bit capture, 3 11.2 kHz zero-cross periods
+200027A0 audio_sample8_buf      -
+2000240A audio_zc_periods       u8[32]
+# --- unsorted (tools/glob.py)
+200001B1 rf_tx_active           u8     # set at TX start (rf_cmd_apply_hi, rf_tx_aprs_afsk, PC quiesce); TIM6 ISR idles while set
+200001B4 key_fn_table           ptr[112] # PF/P key function dispatch (RAM .data), docs/ui.md §7a: [0..56] = function ID (= PF name list index, descriptor 0x080A6758) handlers key_pf_*; [57+id] = key-release handler for momentary IDs (pf_function_is_momentary: 9/12/18/46); unused -> key_pf_nop. 47 BHT On/Off is a no-op without the BT board
+2000A88E afsk_pwm_buf           u16[128] # TIM4 CCR4 DMA double buffer (DMA1 ch7, HT/TC refill); 64 samples = 1 bit at 76.8 kHz
+2000A98E afsk_bit_samples       u16[64] # one synthesised bit: PWM duty values from the sine table at 0x0809F150
+20001354 usb_rx_pending_len     u16    # length of the OUT packet in pc_buf, set by usb_cdc_out_done_cb (USB IRQ), cleared by usb_pc_link_step when taken
+20001089 usb_rx_done            u8     # OUT transfer complete; usb_cdc_rx_arm clears it and re-arms EP3 into pc_buf
+2000109A usb_rx_timeout         u8     # set to 0x32 on every re-arm by usb_pc_link_step
+2000D9AB usb_dev_state          u8     # 3 = configured (usb_pc_link_step only runs then)
+20000CB5 powersave_active       u8     # set while powersave_sleep runs
+20000CB6 powersave_hold         u16    # countdown that keeps the radio awake (PC traffic sets 500)
+200049B8 chan_rec_a             u8[128] # side A channel/VFO record (codeplug channel format; VFO A = channel 4000 @ NAND 0xFC0800, 2nd half @ +0x2000): +0 RX BCD 10 Hz, +4 TX offset BCD, +8 sign/bw/power/type
+20004A38 chan_rec_b             u8[128] # side B record (VFO B = channel 4001 @ NAND 0xFC0840)
+200003E0 other_chan_rec         ptr    # record of the non-main side (cur_chan_rec = main side)
+200003C4 rx_freq_a              u32    # side A RX, 10 Hz units (sides_reload_freqs)
+200003C8 rx_freq_b              u32    # side B RX, 10 Hz units
+200003B8 tx_freq_a              u32    # side A TX, 10 Hz units
+200003BC tx_freq_b              u32    # side B TX, 10 Hz units
+20000CB8 rf_side                u8     # side the RF is on now (0 A, 1 B); rx/tx_freq_10hz follow it
+200065E4 freq_entry_digits      u8[10] # keypad frequency entry string (vfo_freq_digit_entry)

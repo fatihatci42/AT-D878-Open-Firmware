@@ -3,3 +3,6 @@ pyserial>=3.5
 pyyaml>=6.0
 unicorn>=2.1.0
 pypdf>=3.0.0
+# tools/radio_io.py — D878 PC-link köprüsü (pyserial yukarıda zaten var)
+# reverse-engineering/ araç zinciri için: capstone==5.0.9 keystone-engine==0.9.2
+# (Linux, Ghidra gerektirir; bkz. reverse-engineering/requirements.txt)

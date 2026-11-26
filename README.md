@@ -12,6 +12,24 @@
 
 ---
 
+## 🔬 Tersine Mühendislik Altyapısı (`reverse-engineering/`)
+
+AnyTone AT-D878UV/UVII V4.00 stok firmware'inin tersine mühendislik araç
+zinciri: ~700 adlandırılmış fonksiyon, ~60 RAM global'i, Ghidra betik
+altyapısı ve doğrulanmış patch/mod derleyicileri.
+
+- **`reverse-engineering/`** — RE araç zinciri (Ghidra, patch builder'lar, USB debug)
+- **`docs/REVERSE_ENGINEERING_BRIDGE.md`** — RE bulgularının Open Firmware
+  sürücülerine uygulanması (AT1846S bit-banged 3-wire, ST7735S 8080 paralel,
+  SCT3258 HPI pinout, BK1080, GPS, USB CDC protokolü, RAM adres haritası)
+- **`tools/radio_io.py`** — Çapraz platform PC-link köprüsü (Windows uyumlu,
+  saf-pyserial). Okuma-yönlü: info / dump / read / map.
+
+Stok firmware telif korumalıdır ve repoda bulunmaz; herkes kendi kopyasını
+temin eder. Detaylar: `reverse-engineering/README.md`.
+
+---
+
 ## 🌟 Overview & Mission
 
 The **AnyTone AT-D878UVII Plus** is one of the most popular dual-band DMR/FM handheld transceivers in amateur radio. However, the factory software ecosystem is closed-source, limited to traditional Windows CPS tools, and lacks extensible community capabilities.

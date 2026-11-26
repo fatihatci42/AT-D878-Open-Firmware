@@ -39,3 +39,30 @@ Desktop.ini
 *.zip
 *.rar
 !tools/firmware_analyzer/D878UVII PLUS V4.00 official release 250815/D878UVscreens/*.bmp
+
+# -------------------------------------------------------
+# reverse-engineering/ (RE araç zinciri)
+# -------------------------------------------------------
+# Stok firmware telif korumalı — asla repoya girmemeli
+reverse-engineering/firmware/*
+!reverse-engineering/firmware/README.md
+# Ghidra projesi, decompile cache, derleme çıktıları (yerel)
+reverse-engineering/work/
+reverse-engineering/out/
+reverse-engineering/vendor/
+# Paketlenmiş Ghidra projeleri firmware imgesi içerir
+reverse-engineering/**/*.gzf
+reverse-engineering/**/*.CDD
+reverse-engineering/**/*.cdd
+# Telifli referans datasheetler (scripts/fetch_refs.sh ile yerelde)
+reverse-engineering/docs/ref/
+# Yerel ortamlar
+reverse-engineering/.venv/
+reverse-engineering/.venv-*/
+reverse-engineering/.mcp.json
+
+# radio_io.py dökümanları (codeplug / kişisel veri içerebilir)
+out/
+*.nand.bin
+*_backup.bin
+*_dump.bin
