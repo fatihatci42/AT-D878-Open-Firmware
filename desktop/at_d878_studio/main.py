@@ -168,6 +168,9 @@ class RadioLCDWidget(QWidget):
         self.gps_active = True
         self.bt_active = True
         self.rssi_level = 4 # 0..4
+        # Firmware kimliği: "none" | "stock" | "open"
+        self.firmware_type = "none"
+        self.firmware_banner = ""
 
         # Menü Navigasyon Sistemi (AnyTone D878 Birebir)
         self.menu_active = False
@@ -449,34 +452,50 @@ class RadioLCDWidget(QWidget):
         painter.setPen(QPen(QColor("#334155"), 1))
         painter.drawLine(0, 14, 160, 14)
 
-        # S-Metre / Anten (Sol)
+        # Firmware banner (sol köşe — yalnızca firmware yüklendiğinde)
+        if self.firmware_type == "open":
+            painter.fillRect(0, 0, 44, 14, QColor("#064E3B"))
+            painter.setPen(QColor("#34D399"))
+            painter.setFont(QFont("Consolas", 5, QFont.Bold))
+            painter.drawText(2, 10, "OPEN FW")
+            x_start = 46   # S-metre sola kayar
+        elif self.firmware_type == "stock":
+            painter.fillRect(0, 0, 36, 14, QColor("#1E1B4B"))
+            painter.setPen(QColor("#818CF8"))
+            painter.setFont(QFont("Consolas", 5, QFont.Bold))
+            painter.drawText(2, 10, "V4.00")
+            x_start = 38
+        else:
+            x_start = 2    # Banner yok, normal layout
+
+        # S-Metre / Anten (Sol, banner sonrası)
         painter.setPen(QColor("#38BDF8"))
         painter.setFont(QFont("Consolas", 6, QFont.Bold))
-        painter.drawText(2, 10, "Y") # Anten
+        painter.drawText(x_start, 10, "Y") # Anten
         for i in range(4):
             bar_h = (i + 1) * 2
             col = QColor("#10B981") if i < self.rssi_level else QColor("#334155")
-            painter.fillRect(7 + (i * 3), 11 - bar_h, 2, bar_h, col)
+            painter.fillRect(x_start + 5 + (i * 3), 11 - bar_h, 2, bar_h, col)
 
         # Güç Seviyesi (T, H, M, L)
         painter.setPen(QColor("#F59E0B"))
-        painter.drawText(22, 10, self.power_level)
+        painter.drawText(x_start + 20, 10, self.power_level)
 
         # Monitör Hoparlör
         painter.setPen(QColor("#94A3B8"))
-        painter.drawText(31, 10, "🔊")
+        painter.drawText(x_start + 29, 10, "🔊")
 
         # GPS Uydu
         painter.setPen(QColor("#10B981") if self.gps_active else QColor("#64748B"))
-        painter.drawText(46, 10, "GPS")
+        painter.drawText(x_start + 44, 10, "GPS")
 
         # Bluetooth
         painter.setPen(QColor("#38BDF8") if self.bt_active else QColor("#64748B"))
-        painter.drawText(68, 10, "B")
+        painter.drawText(x_start + 66, 10, "B")
 
         # DMR Color Code
         painter.setPen(QColor("#A78BFA"))
-        painter.drawText(80, 10, "C1")
+        painter.drawText(x_start + 78, 10, "C1")
 
         # Pil & Voltaj
         painter.setPen(QColor("#94A3B8"))
@@ -2375,6 +2394,13 @@ class ATD878Studio(QMainWindow):
         self.sim_report_text.append(f"-> Initial SP: 0x{rep.initial_sp:08X} | Reset Handler: 0x{rep.reset_handler:08X}")
         self.sim_report_text.append(f"-> Vektör tablosu: {rep.vector_check_msg}")
 
+        # Firmware türü tespiti (dosya adından ve imaj içeriğinden)
+        fw_identity = self._identify_firmware(rep)
+        self.sim_report_text.append(f"-> Firmware Kimliği: {fw_identity['type']} ({fw_identity['detail']})")
+
+        # LCD simülatörünü firmware kimliğine göre güncelle
+        self._apply_firmware_to_lcd(fw_identity, rep)
+
         if rep.vectors_valid:
             self.sim_report_text.append(f"-> Kısmi CPU emülasyonu: {rep.instructions_executed} komut; durum: {rep.emulation_status}.")
             if rep.emulation_error:
@@ -2383,12 +2409,15 @@ class ATD878Studio(QMainWindow):
                 reg_str = " | ".join(f"{key}={value}" for key, value in rep.registers.items())
                 self.sim_report_text.append(f"-> CPU kayıtçıları: {reg_str}")
             self.sim_report_text.append(f"-> Metin taraması model eşleşmesi: {rep.detected_model}")
-            self.sim_report_text.append(f"-> Metin taraması çağrı kodu eşleşmesi: {rep.detected_callsign}")
+            if fw_identity['type'] == "open":
+                self.sim_report_text.append(f"-> VFO-A: {rep.vfo_a_freq} | VFO-B: {rep.vfo_b_freq}")
+                self.sim_report_text.append(f"-> Metin taraması çağrı kodu: {rep.detected_callsign}")
             self.sim_report_text.append("-> Not: Bu sonuç güvenlik sertifikası değildir; MMIO/periferik ve gerçek LCD davranışı modellenmiyor.")
             self.statusBar().showMessage("Firmware vektör kontrolleri tamamlandı; emülasyon yalnızca kısmi CPU sandbox'ıdır.", 8000)
             QMessageBox.information(
                 self, "Temel Firmware Kontrolleri Tamamlandı",
                 f"• Dosya: {os.path.basename(rep.filepath)}\n"
+                f"• Kimlik: {fw_identity['type'].upper()} firmware\n"
                 f"• Boyut: {rep.filesize} byte\n"
                 f"• Vektör kontrolleri: geçti\n"
                 f"• CPU emülasyon komut sayısı: {rep.instructions_executed}\n"
@@ -2399,6 +2428,87 @@ class ATD878Studio(QMainWindow):
             self.sim_report_text.append(f"[!] Vektör kontrolü başarısız: {rep.vector_check_msg}")
             self.statusBar().showMessage("Firmware vektör tablosu doğrulanamadı.", 8000)
             QMessageBox.warning(self, "Firmware Ön Kontrolü Başarısız", rep.vector_check_msg)
+
+    def _identify_firmware(self, rep):
+        """Yüklenen imajın AÇIK KAYNAK mı, RESMİ stok mu yoksa bilinmeyen mi olduğunu tespit et.
+
+        İki sinyal kullanılır:
+        1. Dosya adı: _OPEN uzantısı / OPEN kelimesi → açık kaynak derlemesi
+        2. İmaj içi imza: açık kaynak derlemesinin .rodata'sında geçen
+           kendine özgü dizgeler (AT-D878 OPEN, GD32F303 Open vb.)
+        Resmi V4.00 imajında bunlar bulunmaz (AnyTone'ın kendi string seti kullanılır).
+        """
+        path = (rep.filepath or "").upper()
+        is_open = ("_OPEN" in path or "OPEN." in path or "OPENFW" in path
+                   or "OPEN_FIRMWARE" in path or "OPEN-FIRMWARE" in path)
+
+        detail_parts = []
+        if not is_open:
+            # İmaj içi imza taraması
+            try:
+                with open(rep.filepath, "rb") as fh:
+                    blob = fh.read()
+                open_signatures = [b"AT-D878 OPEN", b"OPEN FIRMWARE", b"OpenFirmware",
+                                   b"OPEN v", b"at_d878_fw", b"OpenFW"]
+                for sig in open_signatures:
+                    if sig in blob:
+                        is_open = True
+                        detail_parts.append(f"imaj içi imza: {sig.decode('latin1')}")
+                        break
+            except (OSError, AttributeError):
+                pass
+
+        if is_open:
+            detail = "; ".join(detail_parts) if detail_parts else "dosya adı: OPEN işareti"
+            return {"type": "open", "detail": detail or "açık kaynak derleme imzası"}
+        else:
+            # Resmi imaj ayrımı: model string'i var ama açık kaynak imzası yok
+            has_model = rep.detected_model not in ("Bulunamadı", "")
+            return {"type": "stock", "detail": "resmi V4.00 stok imajı" if has_model else "imza bulunamadı; stok varsayıldı"}
+
+    def _apply_firmware_to_lcd(self, fw_identity, rep):
+        """Firmware kimliğini ve emülatör bulgularını LCD simülatörüne uygula.
+
+        - Açık kaynak firmware: farklı zona adı + farklı VFO varsayılanları
+        - Stok firmware: standart AnyTone görünümü
+        - Emülatörde yakalanan VFO frekansları/çağrı kodu varsa LCD'ye aktar
+        """
+        lcd = self.lcd_screen
+        if fw_identity["type"] == "open":
+            # Açık kaynak firmware kimliği
+            lcd.firmware_type = "open"
+            lcd.vfo_a_name = "VFO-A OPEN FW"
+            lcd.vfo_b_name = "VFO-B OPEN FW"
+            lcd.vfo_b_tg = "TG 286 (OPEN)"
+            lcd.gps_active = False
+            lcd.bt_active = False
+            # Açık FW başlangıç frekansları (emülatör bulgusu varsa onları kullan)
+            if rep.vfo_a_freq not in ("Bulunamadı", ""):
+                lcd.vfo_a_freq = self._format_vfo_freq(rep.vfo_a_freq)
+            if rep.vfo_b_freq not in ("Bulunamadı", ""):
+                lcd.vfo_b_freq = self._format_vfo_freq(rep.vfo_b_freq)
+            if rep.detected_callsign not in ("Bulunamadı", ""):
+                call = rep.detected_callsign.strip()
+                lcd.vfo_a_name = f"{call}"
+            self.sim_report_text.append("[*] LCD simülatörü: AÇIK KAYNAK firmware profili yüklendi.")
+        else:
+            # Stok firmware kimliği
+            lcd.firmware_type = "stock"
+            lcd.vfo_a_name = "VFO-A 2M"
+            lcd.vfo_b_name = "TG TURKIYE"
+            lcd.vfo_b_tg = "TG 286"
+            lcd.gps_active = True
+            lcd.bt_active = True
+            lcd.vfo_a_freq = "145.500.00"
+            lcd.vfo_b_freq = "433.500.00"
+            self.sim_report_text.append("[*] LCD simülatörü: RESMİ (stok) firmware profili yüklendi.")
+        lcd.update()
+
+    @staticmethod
+    def _format_vfo_freq(freq_str):
+        """'145.50000' gibi bir tarama eşleşmesini '145.500.00' formatına çevir."""
+        s = freq_str.replace(".", "").ljust(8, "0")[:8]
+        return f"{s[:3]}.{s[3:6]}.{s[6:8]}"
 
     def sim_ptt_down(self):
         self.lcd_screen.is_tx = True
